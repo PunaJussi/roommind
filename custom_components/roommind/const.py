@@ -96,6 +96,13 @@ AC_BOOST_DELTA_MAX = 50.0  # Comfort-end AC cap (°C); finite value above any re
 PROPORTIONAL_DEADBAND_C = 0.5  # Minimum proportional setpoint change (°C) to resend, in the gentle regime
 PROPORTIONAL_DEADBAND_NEAR_TARGET_C = 0.2  # Finer proportional deadband (°C) within 1°C of target
 PROPORTIONAL_SETPOINT_DWELL_SECONDS = 300  # Minimum time a proportional setpoint stays on the device before a recomputed one replaces it (one MPC block, #317)
+# Gradual AC thermostat: 0 minutes leaves the proportional setpoint immediate.
+SETPOINT_RAMP_MINUTES_MIN = 5
+SETPOINT_RAMP_MINUTES_MAX = 360
+SETPOINT_RAMP_MINUTES_DEFAULT = 60  # Suggested interval when the user turns the ramp on
+SETPOINT_RAMP_STEP_MIN = 0.1  # °C
+SETPOINT_RAMP_STEP_MAX = 5.0  # °C
+SETPOINT_RAMP_STEP_DEFAULT = 0.5  # °C moved toward the proportional setpoint per interval
 BOOST_CAP_FALLBACK_STEP = 0.5  # Distance kept below a device's max_temp for proportional heating setpoints when it reports no target_temp_step (#396)
 # Direct valve control (#413): TRVs whose valve opening RoomMind sets through number entities
 VALVE_DWELL_SECONDS = 600  # Minimum time a valve position stays before a small correction moves the motor again

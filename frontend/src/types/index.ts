@@ -88,6 +88,8 @@ export interface DeviceConfig {
   setback_auto_off?: boolean; // setback ends in off after an hour without demand, default off (#255)
   setpoint_mode?: "proportional" | "direct"; // default "proportional"
   setpoint_offset?: number; // °C added to the room target in direct mode, default 0
+  setpoint_ramp_minutes?: number; // 0 = off, otherwise minutes between AC setpoint steps
+  setpoint_ramp_step?: number; // max °C moved toward the proportional setpoint per step
   coil_dry?: "inherit" | "on" | "off"; // default "inherit"
   coil_dry_minutes?: number; // 0 = inherit global
   coil_dry_mode?: "" | "fan_only" | "dry"; // "" = inherit global

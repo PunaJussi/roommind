@@ -109,6 +109,21 @@ This only applies in rooms with an external room sensor and to devices that repo
 
 In `Proportional` mode the boosted heating setpoint stays one step (`target_temp_step`, 0.5 °C if the device reports none) below the device's `max_temp`, and never below the room target. Some integrations reject exactly their own `max_temp`, which made the Dyson Heat/Cool purifier ignore the 37°C setpoint. The cooling floor (`min_temp`) is unchanged.
 
+#### Gradual thermostat
+
+The heat pump's own thermostat runs the compressor. The sensor inside the indoor unit only roughly follows the air in the room, and the gap changes with the outdoor temperature. `Gradual thermostat` trims the setpoint the user left on the unit, from the room sensor, at most one step per interval. You switch the unit between heating and cooling yourself. RoomMind does not change that mode.
+
+The fields are on the device, in the room's device editor, for a climate device in `Proportional` mode in a room with an external temperature sensor:
+
+- `Adjustment interval`: 5 to 360 minutes. 60 minutes is a calm start. 0 minutes, the default, leaves the unit alone.
+- `Maximum step`: 0.1 to 5 °C. 0.5 °C is a calm start. A device that only accepts whole degrees still moves by at least its own `target_temp_step`.
+
+While the unit is in `heat` or `cool`, RoomMind sends only a temperature. The room more than one step below the target raises it; more than one step above lowers it. Cooling uses the cooling target and the same rule. Within one step of the target the last value stays, so the unit's own sensor can sit several degrees away from the room. That settled value is what compensates for the outdoor-dependent sensor gap. There is no separate outdoor curve.
+
+The trim keeps going when the room is satisfied. `When idle` does not switch the unit off. A unit that is off, or in fan or dry mode, is left as it is until you put it back in heating or cooling. The last setpoint is remembered across that, and across a restart. The first value, when nothing has been remembered yet, is the temperature already set on the unit.
+
+A schedule or away action that turns the room off, an open window, climate control switched off, and coil drying still stop the unit at once. The setting has no effect in `Direct` mode, on radiator valves, or in Managed mode.
+
 ## Direct Valve Control (TRVs)
 
 Some TRVs let Home Assistant set the valve opening itself through `number` entities, for example the SONOFF TRVZB in Zigbee2MQTT (`valve_opening_degree` and `valve_closing_degree`). With a setpoint, a TRV opens its valve fully as soon as it wants heat, so the radiator runs at full power in short bursts. With direct valve control RoomMind holds the valve at the opening the room needs, for example 30 %, for as long as it is needed.

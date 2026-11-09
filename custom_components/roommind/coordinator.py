@@ -65,6 +65,7 @@ from .control.mpc_controller import (
     is_mpc_active,
 )
 from .control.residual_heat import mean_rebound
+from .control.setpoint_ramp import SetpointRamp, ramp_config, ramped_display_eid
 from .control.solar import compute_q_solar_norm
 from .control.thermal_model import RoomModelManager
 from .managers.ac_coil_dry_manager import AcCoilDryManager, CoilDryRoomResult
@@ -90,6 +91,7 @@ from .utils.device_utils import (
     configured_valves,
     get_ac_eids,
     get_all_entity_ids,
+    get_device_by_eid,
     get_direct_setpoint_eids,
     get_setpoint_offset,
     get_setpoint_offsets,
@@ -238,6 +240,8 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         self.device_setpoints: DeviceSetpointTracker = hass.data.setdefault(DOMAIN, {}).setdefault(
             "device_setpoints", DeviceSetpointTracker(time.monotonic)
         )
+        # Last gradual AC setpoint, so a restart continues the ramp instead of reseeding
+        self._setpoint_ramp = SetpointRamp()
         # EKF training accumulation
         self._ekf_training = EkfTrainingManager(self._model_manager)
         # Cover/blind automatic control
@@ -337,6 +341,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             self._valve_manager.load_actuation_data(settings.get("valve_last_actuation", {}))
             self._coil_dry_manager.load_state(settings.get("coil_dry_state", {}))
             self._head_offsets.load_state(settings.get("ac_head_offsets", {}))
+            self._setpoint_ramp.load_state(settings.get("ac_setpoint_ramps", {}))
             self._model_loaded = True
 
         # Initialize history store (once)
@@ -506,6 +511,12 @@ class RoomMindCoordinator(DataUpdateCoordinator):
         if self._head_offsets.dirty and self._thermal_save_count == 0:
             await store.async_save_settings({"ac_head_offsets": self._head_offsets.get_state()})
             self._head_offsets.dirty = False
+
+        self._setpoint_ramp.prune(set(build_rooms_devices_map(rooms)))
+        # A step is the only memory of where the thermostat sits; save it when it moves
+        if self._setpoint_ramp.dirty:
+            await store.async_save_settings({"ac_setpoint_ramps": self._setpoint_ramp.get_state()})
+            self._setpoint_ramp.dirty = False
 
         # Coil dry: drop state for devices no longer configured anywhere
         self._coil_dry_manager.prune(set(build_rooms_devices_map(stored_rooms)))
@@ -976,6 +987,7 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             q_rebound=q_rebound,
             previous_heat_sources=self._heat_source_states.get(area_id, "none"),
             head_offsets=self._head_offsets,
+            setpoint_ramp=self._setpoint_ramp,
         )
         mode, power_fraction = await controller.async_evaluate(current_temp, targets)
 
@@ -1295,7 +1307,11 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 elif mode != MODE_IDLE:
                     self._compressor_manager.update_member(eid, True)
                 else:
-                    self._compressor_manager.update_member(eid, False)
+                    dev_state = self.hass.states.get(eid)
+                    trimming = ramp_config(get_device_by_eid(room.get("devices", []), eid)) is not None and (
+                        dev_state is not None and dev_state.state in ("heat", "cool")
+                    )
+                    self._compressor_manager.update_member(eid, trimming)
 
         # --- Cover/blind automatic control ---
         has_override = is_override_active(room)
@@ -1726,32 +1742,38 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             "mode": display_mode,
             "commanded_mode": mode,
             "heating_power": round(display_pf * 100) if display_mode != MODE_IDLE else 0,
-            "device_setpoint": self._compute_device_setpoint_orchestrated(
-                heat_source_plan,
-                current_temp,
-                target_temp,
-                device_max_temp,
-                ac_device_max_temp,
+            "device_setpoint": self._ramped_device_setpoint(
+                self._compute_device_setpoint_orchestrated(
+                    heat_source_plan,
+                    current_temp,
+                    target_temp,
+                    device_max_temp,
+                    ac_device_max_temp,
+                    direct_eids=_direct_eids,
+                    direct_offsets=_direct_offsets,
+                    direct_target=direct_target,
+                    head_offsets=_ac_heat_shifts,
+                )
+                if heat_source_plan is not None
+                else self._compute_device_setpoint(
+                    mode,
+                    power_fraction,
+                    current_temp,
+                    target_temp,
+                    has_external_sensor,
+                    device_max_temp=device_max_temp,
+                    device_min_temp=device_min_temp,
+                    has_thermostats=bool(get_trv_eids(_room_devices)),
+                    has_acs=bool(get_ac_eids(_room_devices)),
+                    all_direct=_all_direct,
+                    direct_offset=_display_offset,
+                    direct_target=direct_target,
+                    head_offset=_head_shift,
+                ),
+                mode=mode,
+                devices=_room_devices,
+                heat_source_plan=heat_source_plan,
                 direct_eids=_direct_eids,
-                direct_offsets=_direct_offsets,
-                direct_target=direct_target,
-                head_offsets=_ac_heat_shifts,
-            )
-            if heat_source_plan is not None
-            else self._compute_device_setpoint(
-                mode,
-                power_fraction,
-                current_temp,
-                target_temp,
-                has_external_sensor,
-                device_max_temp=device_max_temp,
-                device_min_temp=device_min_temp,
-                has_thermostats=bool(get_trv_eids(_room_devices)),
-                has_acs=bool(get_ac_eids(_room_devices)),
-                all_direct=_all_direct,
-                direct_offset=_display_offset,
-                direct_target=direct_target,
-                head_offset=_head_shift,
             ),
             "window_open": window_open,
             **build_override_live(
@@ -1873,6 +1895,22 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             return max(boost, round(sp + head_offset, 1))
 
         return None
+
+    def _ramped_device_setpoint(
+        self,
+        computed: float | None,
+        *,
+        mode: str,
+        devices: list[dict],
+        heat_source_plan: HeatSourcePlan | None,
+        direct_eids: set[str],
+    ) -> float | None:
+        """Show the setpoint a ramped AC was actually sent, once that run has a value."""
+        eid = ramped_display_eid(mode, devices, heat_source_plan=heat_source_plan, direct_eids=direct_eids)
+        if eid is None:
+            return computed
+        ramped = self._setpoint_ramp.setpoint(eid)
+        return computed if ramped is None else ramped
 
     def _observe_head_offsets(self, room: dict, room_temp: float | None) -> None:
         """Feed each AC's own reading against a fresh room reading into the offset tracker."""
@@ -2361,7 +2399,15 @@ class RoomMindCoordinator(DataUpdateCoordinator):
     async def _async_switch_devices_off(self, area_id: str, devices: list[dict], targets: TargetTemps) -> None:
         for entity_id in get_all_entity_ids(devices):
             try:
-                await async_idle_device(self.hass, entity_id, devices, area_id=area_id, targets=targets, force_off=True)
+                await async_idle_device(
+                    self.hass,
+                    entity_id,
+                    devices,
+                    area_id=area_id,
+                    targets=targets,
+                    force_off=True,
+                    ramp=self._setpoint_ramp,
+                )
             except Exception:  # noqa: BLE001
                 _LOGGER.warning("Room '%s': switching '%s' off failed", area_id, entity_id, exc_info=True)
                 continue

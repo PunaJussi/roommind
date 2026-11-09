@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import voluptuous as vol
 from homeassistant.components import websocket_api
@@ -23,6 +23,11 @@ from .const import (
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
     OVERRIDE_CUSTOM,
     OVERRIDE_TYPES,
+    SETPOINT_RAMP_MINUTES_MAX,
+    SETPOINT_RAMP_MINUTES_MIN,
+    SETPOINT_RAMP_STEP_DEFAULT,
+    SETPOINT_RAMP_STEP_MAX,
+    SETPOINT_RAMP_STEP_MIN,
     build_override_live,
     is_override_suppressed,
 )
@@ -53,6 +58,27 @@ from .utils.device_utils import (
 from .utils.schedule_utils import mask_override_band, override_preset_band
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _setpoint_ramp_minutes(value: Any) -> int:
+    """0 disables the ramp. Any other value is an interval of 5 to 360 minutes."""
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError) as err:
+        raise vol.Invalid("setpoint_ramp_minutes must be an integer") from err
+    if minutes == 0 or SETPOINT_RAMP_MINUTES_MIN <= minutes <= SETPOINT_RAMP_MINUTES_MAX:
+        return minutes
+    raise vol.Invalid(
+        f"setpoint_ramp_minutes must be 0 or between {SETPOINT_RAMP_MINUTES_MIN} and {SETPOINT_RAMP_MINUTES_MAX}"
+    )
+
+
+def _validate_device_setpoint_ramp(device: dict) -> dict:
+    """The gradual thermostat is only for climate devices. Other types keep the defaults."""
+    if device.get("type") != "ac":
+        device["setpoint_ramp_minutes"] = 0
+        device["setpoint_ramp_step"] = SETPOINT_RAMP_STEP_DEFAULT
+    return device
 
 
 def _validate_device_idle_action(device: dict) -> dict:
@@ -405,6 +431,10 @@ async def websocket_list_rooms(
                     vol.Optional("setpoint_offset", default=0.0): vol.All(
                         vol.Coerce(float), vol.Range(min=SETPOINT_OFFSET_MIN, max=SETPOINT_OFFSET_MAX)
                     ),
+                    vol.Optional("setpoint_ramp_minutes", default=0): _setpoint_ramp_minutes,
+                    vol.Optional("setpoint_ramp_step", default=SETPOINT_RAMP_STEP_DEFAULT): vol.All(
+                        vol.Coerce(float), vol.Range(min=SETPOINT_RAMP_STEP_MIN, max=SETPOINT_RAMP_STEP_MAX)
+                    ),
                     vol.Optional("coil_dry", default=COIL_DRY_INHERIT): vol.In(COIL_DRY_OVERRIDES),
                     vol.Optional("coil_dry_minutes", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
                     vol.Optional("coil_dry_mode", default=""): vol.In(["", *COIL_DRY_MODES]),
@@ -414,6 +444,7 @@ async def websocket_list_rooms(
                     # No default: devices without it keep their stored form (#482)
                     vol.Optional("valve_closing_mode"): vol.In(VALVE_CLOSING_MODES),
                 },
+                _validate_device_setpoint_ramp,
                 _validate_device_idle_action,
                 _validate_device_coil_dry,
                 _validate_device_valve,

@@ -1035,32 +1035,90 @@ export class RsDeviceSection extends LitElement {
                 <rs-info-icon .text=${localize("devices.setpoint_mode_hint", lang)}></rs-info-icon>
               </div>
               ${
-                device.setpoint_mode === "direct"
+                device.setpoint_mode !== "direct" && isAc
                   ? html`
-                      <div class="detail-field with-info">
-                        <ha-textfield
-                          .label=${localize("devices.setpoint_offset", lang)}
-                          .suffix=${tempUnit(this.hass)}
-                          .value=${String(
-                            Math.round(
-                              toDisplayDelta(device.setpoint_offset ?? 0, this.hass) * 10,
-                            ) / 10,
-                          )}
-                          type="number"
-                          .step=${usesFahrenheit(this.hass) ? "1" : "0.5"}
-                          .min=${String(Math.round(toDisplayDelta(-5, this.hass)))}
-                          .max=${String(Math.round(toDisplayDelta(5, this.hass)))}
-                          @change=${(e: Event) => {
-                            const v = parseFloat((e.target as HTMLInputElement).value);
-                            if (!isNaN(v)) this._onSetpointOffsetChange(entityId, v);
-                          }}
-                        ></ha-textfield>
-                        <rs-info-icon
-                          .text=${localize("devices.setpoint_offset_hint", lang)}
-                        ></rs-info-icon>
+                      <div class="detail-field">
+                        <rs-toggle-row
+                          .label=${localize("devices.setpoint_ramp", lang)}
+                          .hint=${localize("devices.setpoint_ramp_hint", lang)}
+                          .checked=${(device.setpoint_ramp_minutes ?? 0) > 0}
+                          @toggle-changed=${(e: CustomEvent<boolean>) =>
+                            this._onRampToggle(entityId, e.detail)}
+                        ></rs-toggle-row>
                       </div>
+                      ${
+                        (device.setpoint_ramp_minutes ?? 0) > 0
+                          ? html`
+                              <div class="detail-field with-info">
+                                <ha-textfield
+                                  .label=${localize("devices.setpoint_ramp_minutes", lang)}
+                                  .value=${String(device.setpoint_ramp_minutes)}
+                                  type="number"
+                                  step="1"
+                                  min="5"
+                                  max="360"
+                                  @change=${(e: Event) => {
+                                    const v = parseInt((e.target as HTMLInputElement).value, 10);
+                                    if (!isNaN(v)) this._onRampMinutesChange(entityId, v);
+                                  }}
+                                ></ha-textfield>
+                                <rs-info-icon
+                                  .text=${localize("devices.setpoint_ramp_minutes_hint", lang)}
+                                ></rs-info-icon>
+                              </div>
+                              <div class="detail-field with-info">
+                                <ha-textfield
+                                  .label=${localize("devices.setpoint_ramp_step", lang)}
+                                  .suffix=${tempUnit(this.hass)}
+                                  .value=${String(
+                                    Math.round(
+                                      toDisplayDelta(device.setpoint_ramp_step ?? 0.5, this.hass) *
+                                        10,
+                                    ) / 10,
+                                  )}
+                                  type="number"
+                                  .step=${usesFahrenheit(this.hass) ? "0.5" : "0.1"}
+                                  .min=${String(toDisplayDelta(0.1, this.hass))}
+                                  .max=${String(toDisplayDelta(5, this.hass))}
+                                  @change=${(e: Event) => {
+                                    const v = parseFloat((e.target as HTMLInputElement).value);
+                                    if (!isNaN(v)) this._onRampStepChange(entityId, v);
+                                  }}
+                                ></ha-textfield>
+                                <rs-info-icon
+                                  .text=${localize("devices.setpoint_ramp_step_hint", lang)}
+                                ></rs-info-icon>
+                              </div>
+                            `
+                          : nothing
+                      }
                     `
-                  : nothing
+                  : device.setpoint_mode === "direct"
+                    ? html`
+                        <div class="detail-field with-info">
+                          <ha-textfield
+                            .label=${localize("devices.setpoint_offset", lang)}
+                            .suffix=${tempUnit(this.hass)}
+                            .value=${String(
+                              Math.round(
+                                toDisplayDelta(device.setpoint_offset ?? 0, this.hass) * 10,
+                              ) / 10,
+                            )}
+                            type="number"
+                            .step=${usesFahrenheit(this.hass) ? "1" : "0.5"}
+                            .min=${String(Math.round(toDisplayDelta(-5, this.hass)))}
+                            .max=${String(Math.round(toDisplayDelta(5, this.hass)))}
+                            @change=${(e: Event) => {
+                              const v = parseFloat((e.target as HTMLInputElement).value);
+                              if (!isNaN(v)) this._onSetpointOffsetChange(entityId, v);
+                            }}
+                          ></ha-textfield>
+                          <rs-info-icon
+                            .text=${localize("devices.setpoint_offset_hint", lang)}
+                          ></rs-info-icon>
+                        </div>
+                      `
+                    : nothing
               }
             `
           : nothing
@@ -1279,6 +1337,40 @@ export class RsDeviceSection extends LitElement {
       d.entity_id === entityId ? { ...d, setpoint_mode: mode as "proportional" | "direct" } : d,
     );
     this._fireDeviceChanged(newDevices);
+  }
+
+  private _onRampToggle(entityId: string, enabled: boolean): void {
+    this._fireDeviceChanged(
+      this.devices.map((d) => {
+        if (d.entity_id !== entityId) return d;
+        return {
+          ...d,
+          setpoint_ramp_minutes: enabled ? d.setpoint_ramp_minutes || 60 : 0,
+          setpoint_ramp_step: d.setpoint_ramp_step ?? 0.5,
+        };
+      }),
+    );
+  }
+
+  private _onRampMinutesChange(entityId: string, minutes: number): void {
+    const clamped = Math.max(5, Math.min(360, Math.round(minutes)));
+    this._fireDeviceChanged(
+      this.devices.map((d) =>
+        d.entity_id === entityId ? { ...d, setpoint_ramp_minutes: clamped } : d,
+      ),
+    );
+  }
+
+  private _onRampStepChange(entityId: string, displayValue: number): void {
+    const celsius = Math.max(
+      0.1,
+      Math.min(5, Math.round(toCelsiusDelta(displayValue, this.hass) * 10) / 10),
+    );
+    this._fireDeviceChanged(
+      this.devices.map((d) =>
+        d.entity_id === entityId ? { ...d, setpoint_ramp_step: celsius } : d,
+      ),
+    );
   }
 
   private _onSetpointOffsetChange(entityId: string, displayValue: number): void {

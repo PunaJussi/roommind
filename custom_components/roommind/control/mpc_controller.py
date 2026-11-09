@@ -55,6 +55,7 @@ from ..utils.device_utils import (
     ValveEntities,
     get_ac_eids,
     get_all_entity_ids,
+    get_device_by_eid,
     get_direct_setpoint_eids,
     get_idle_action,
     get_setback_auto_off,
@@ -64,10 +65,11 @@ from ..utils.device_utils import (
     get_valve_entities,
     has_reliable_hvac_modes,
 )
-from ..utils.temp_utils import celsius_delta_to_ha, celsius_to_ha_temp
+from ..utils.temp_utils import celsius_delta_to_ha, celsius_to_ha_temp, ha_temp_to_celsius
 from .direct_valve import async_release_valve, async_set_valve, clear_valve_cache
 from .mpc_optimizer import MPCOptimizer, MPCPlan, preheat_max_blocks, slow_start_penalty
 from .residual_heat import get_min_run_blocks, mean_rebound
+from .setpoint_ramp import SetpointRamp, ramp_config
 from .thermal_model import RoomModelManager
 
 if TYPE_CHECKING:
@@ -578,8 +580,12 @@ async def async_idle_device(
     use_setpoint_offset: bool = True,
     release_setback: frozenset[str] = frozenset(),
     head_offset: float = 0.0,
+    ramp: SetpointRamp | None = None,
 ) -> None:
     """Idle a climate device per its configured idle_action.
+
+    ``ramp`` forgets a gradual AC setpoint, so the next run starts from the
+    measured temperature instead of continuing a run that already ended.
 
     "off"      -> async_turn_off_climate() (existing behavior)
     "fan_only" -> hvac_mode=fan_only + set_fan_mode(idle_fan_mode)
@@ -603,10 +609,12 @@ async def async_idle_device(
     (schedule_off_action / presence_away_action = "off").  It outranks the
     per-device idle_action, which only expresses "no heat/cool demand right
     now" — e.g. fan_only would keep an AC circulating air after the schedule
-    ended (#368).  IDLE_ACTION_LOW is exempt: it exists because some battery
+    ended (#368). IDLE_ACTION_LOW is exempt: it exists because some battery
     Zigbee TRVs enter deep sleep in hvac_mode=off and lose later wake-up
     commands (#183), and lowering to min_temp already stops all heat output.
     """
+    if ramp is not None:
+        ramp.clear(entity_id)
     idle_action, idle_fan_mode = get_idle_action(devices, entity_id)
     if force_off and idle_action != IDLE_ACTION_LOW:
         idle_action = IDLE_ACTION_OFF
@@ -1329,6 +1337,7 @@ class MPCController:
         q_rebound: float | None = None,
         previous_heat_sources: str = "none",
         head_offsets: HeadOffsetTracker | None = None,
+        setpoint_ramp: SetpointRamp | None = None,
     ) -> None:
         self.hass = hass
         self.room_config = room_config
@@ -1367,6 +1376,8 @@ class MPCController:
         self.q_rebound = q_rebound
         # Learned AC sensor offsets (device reading - room sensor); None leaves setpoints in the room frame
         self._head_offsets = head_offsets
+        # Shared across cycles: a fresh tracker would take a step every 30 s
+        self._setpoint_ramp = setpoint_ramp if setpoint_ramp is not None else SetpointRamp()
         self._idle_targets: TargetTemps | None = None
         self._force_off = False
         # Strictest heat / cool target within the MPC guard window (set by _evaluate_mpc)
@@ -2072,6 +2083,10 @@ class MPCController:
         # ACs were previously never filtered because exclude_eids only ever
         # carried TRVs (valve protection is TRV-only).  Coil dry excludes ACs.
         acs = [e for e in self.acs if e not in _exclude]
+        # Coil-dry (and any other exclude) owns the device this cycle: the run has ended
+        for eid in self.acs:
+            if eid not in acs:
+                self._setpoint_ramp.clear(eid)
         sitting_out = set(acs) if ac_heating_excluded(self.room_config) else set()
 
         if not self.has_external_sensor:
@@ -2099,6 +2114,7 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(eid, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     continue
                 if can_heat and ha_heat_target is not None:
@@ -2120,6 +2136,7 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(eid, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     continue
                 ac_state = self.hass.states.get(eid)
@@ -2216,7 +2233,9 @@ class MPCController:
                     # running. Same rule as the idle hold: the device keeps its last
                     # setpoint unless the target changed on purpose (#436). A device
                     # that reports off (state lag or switched off by hand) is not
-                    # switched on again.
+                    # switched on again. A trimmed AC keeps nudging its setpoint.
+                    if await self._async_fine_tune_ac(cmd.entity_id, targets, current_temp):
+                        continue
                     _LOGGER.debug(
                         "Area '%s': keeping '%s' active (compressor min-run protection)",
                         self._area_id,
@@ -2234,6 +2253,7 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(cmd.entity_id, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     await self._async_release_valve(cmd.entity_id)
                     continue
@@ -2258,6 +2278,8 @@ class MPCController:
                             deadband=self._proportional_deadband(cmd.entity_id, current_temp, effective_target),
                         )
                     else:  # ac
+                        if await self._async_fine_tune_ac(cmd.entity_id, targets, current_temp):
+                            continue
                         if self.has_external_sensor and current_temp is not None:
                             t = round(
                                 current_temp + cmd.power_fraction * (ac_heat_boost - current_temp),
@@ -2268,8 +2290,13 @@ class MPCController:
                         else:
                             t = effective_target
                         shift = self._head_offset(cmd.entity_id, "heat")
-                        ha_t = self._heating_setpoint_ha(
-                            cmd.entity_id, t + shift, effective_target + shift, direct_target
+                        ha_t, ac_deadband = self._ac_heat_command(
+                            cmd.entity_id,
+                            t + shift,
+                            effective_target + shift,
+                            direct_target,
+                            current_temp,
+                            effective_target,
                         )
                         ac_state = self.hass.states.get(cmd.entity_id)
                         ac_modes = _effective_ac_modes(ac_state)
@@ -2287,7 +2314,7 @@ class MPCController:
                                 "set_temperature",
                                 {"entity_id": cmd.entity_id, "temperature": ha_t, "hvac_mode": ac_mode},
                                 temp_intent="heat",
-                                deadband=self._proportional_deadband(cmd.entity_id, current_temp, effective_target),
+                                deadband=ac_deadband,
                             )
                         else:
                             await self._call("set_hvac_mode", {"entity_id": cmd.entity_id, "hvac_mode": "off"})
@@ -2308,6 +2335,7 @@ class MPCController:
                             targets=targets,
                             use_setpoint_offset=self.has_external_sensor,
                             head_offset=self._head_offset(cmd.entity_id, "idle"),
+                            ramp=self._setpoint_ramp,
                         )
                         await self._async_release_valve(cmd.entity_id)
                     else:
@@ -2338,6 +2366,7 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(eid, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     await self._async_release_valve(eid)
                     continue
@@ -2376,10 +2405,20 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(eid, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     continue
+                if await self._async_fine_tune_ac(eid, targets, current_temp):
+                    continue
                 shift = self._head_offset(eid, "heat")
-                ha_t = self._heating_setpoint_ha(eid, ac_heat_target + shift, effective_target + shift, direct_target)
+                ha_t, ac_deadband = self._ac_heat_command(
+                    eid,
+                    ac_heat_target + shift,
+                    effective_target + shift,
+                    direct_target,
+                    current_temp,
+                    effective_target,
+                )
                 ac_state = self.hass.states.get(eid)
                 ac_modes = _effective_ac_modes(ac_state)
                 if "heat" in ac_modes:
@@ -2396,7 +2435,7 @@ class MPCController:
                         "set_temperature",
                         {"entity_id": eid, "temperature": ha_t, "hvac_mode": ac_mode},
                         temp_intent="heat",
-                        deadband=self._proportional_deadband(eid, current_temp, effective_target),
+                        deadband=ac_deadband,
                     )
                 else:
                     await self._call("set_hvac_mode", {"entity_id": eid, "hvac_mode": "off"})
@@ -2420,16 +2459,20 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(eid, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     continue
-                direct_t = self._direct_setpoint_ha(eid, direct_target)
-                ha_t = direct_t if direct_t is not None else self._cooling_setpoint_ha(eid, ac_cool_target)
+                if await self._async_fine_tune_ac(eid, targets, current_temp):
+                    continue
+                ha_t, ac_deadband = self._ac_cool_command(
+                    eid, ac_cool_target, direct_target, current_temp, effective_target
+                )
                 await self._call("set_hvac_mode", {"entity_id": eid, "hvac_mode": "cool"})
                 await self._call(
                     "set_temperature",
                     {"entity_id": eid, "temperature": ha_t, "hvac_mode": "cool"},
                     temp_intent="cool",
-                    deadband=self._proportional_deadband(eid, current_temp, effective_target),
+                    deadband=ac_deadband,
                 )
             for eid in thermostats:
                 if eid in _forced_off:
@@ -2441,6 +2484,7 @@ class MPCController:
                         targets=targets,
                         use_setpoint_offset=self.has_external_sensor,
                         head_offset=self._head_offset(eid, "idle"),
+                        ramp=self._setpoint_ramp,
                     )
                     await self._async_release_valve(eid)
                     continue
@@ -2448,6 +2492,8 @@ class MPCController:
                 await self._async_release_valve(eid)
         elif mode == MODE_IDLE:
             for eid in thermostats + acs:
+                if await self._async_fine_tune_ac(eid, targets, current_temp):
+                    continue
                 if eid in _forced_on:
                     # Compressor min-run: keep the device running. Its last active
                     # setpoint does that; falling back to the room target at once
@@ -2470,6 +2516,7 @@ class MPCController:
                     targets=targets,
                     use_setpoint_offset=self.has_external_sensor,
                     head_offset=self._head_offset(eid, "idle"),
+                    ramp=self._setpoint_ramp,
                     force_off=force_off,
                     release_setback=self._release_setback_for(eid, sitting_out),
                 )
@@ -2495,6 +2542,7 @@ class MPCController:
             targets=targets,
             use_setpoint_offset=self.has_external_sensor,
             head_offset=self._head_offset(eid, "idle"),
+            ramp=self._setpoint_ramp,
             force_off=self._force_off,
             release_setback=_SETBACK_RELEASE_ALL,
         )
@@ -2563,6 +2611,19 @@ class MPCController:
         direct = self._direct_setpoint_ha(eid, target)
         return direct if direct is not None else celsius_to_ha_temp(self.hass, target + self._head_offset(eid, intent))
 
+    def _held_temperature_ha(
+        self, eid: str, target: float, intent: str, current_temp: float | None, *, ease: bool
+    ) -> float:
+        """Hold setpoint. A trimmed AC keeps its last nudge.
+
+        An overshoot still gets the plain target on every other device: the boost must not
+        carry the room through the far side of the band for the rest of the minimum run.
+        """
+        held = self._setpoint_ramp.setpoint(eid) if self._ramp_params(eid) is not None else None
+        if held is not None:
+            return celsius_to_ha_temp(self.hass, held)
+        return self._hold_setpoint_ha(eid, target, intent)
+
     async def _async_hold_retarget(self, eid: str, targets: TargetTemps, current_temp: float | None) -> None:
         """Pass a deliberately changed target on to a device held by the compressor min-run.
 
@@ -2626,11 +2687,12 @@ class MPCController:
         if hvac in ("heat", "cool"):
             target = targets.heat if hvac == "heat" else targets.cool
             if target is not None:
+                temperature = self._held_temperature_ha(eid, target, hvac, current_temp, ease=not overshoot)
                 result = await self._call_and_record(
                     eid,
                     new_record,
                     "set_temperature",
-                    {"entity_id": eid, "temperature": self._hold_setpoint_ha(eid, target, hvac)},
+                    {"entity_id": eid, "temperature": temperature},
                     temp_intent=hvac,
                 )
                 if result != _CALL_FAILED:
@@ -2638,6 +2700,7 @@ class MPCController:
                     _hold_modulated.add(eid)
                     if overshoot:
                         _overshoot_sent.add(eid)
+                        self._note_ramped_ha(eid, temperature, hvac)
             return
 
         # heat_cool/auto regulate from both sides onto what they get, so a single
@@ -2664,7 +2727,12 @@ class MPCController:
                     eid,
                     new_record,
                     "set_temperature",
-                    {"entity_id": eid, "temperature": self._hold_setpoint_ha(eid, targets.heat, "heat")},
+                    {
+                        "entity_id": eid,
+                        "temperature": self._held_temperature_ha(
+                            eid, targets.heat, "heat", current_temp, ease=not overshoot
+                        ),
+                    },
                     temp_intent="heat",
                 )
             elif targets.cool is not None and current_temp >= targets.cool:
@@ -2672,7 +2740,12 @@ class MPCController:
                     eid,
                     new_record,
                     "set_temperature",
-                    {"entity_id": eid, "temperature": self._hold_setpoint_ha(eid, targets.cool, "cool")},
+                    {
+                        "entity_id": eid,
+                        "temperature": self._held_temperature_ha(
+                            eid, targets.cool, "cool", current_temp, ease=not overshoot
+                        ),
+                    },
                     temp_intent="cool",
                 )
 
@@ -2741,11 +2814,11 @@ class MPCController:
             current_temp,
             target,
         )
-        result = await self._call(
-            "set_temperature", {"entity_id": eid, "temperature": round(level, 2)}, temp_intent=hvac
-        )
+        level = round(level, 2)
+        result = await self._call("set_temperature", {"entity_id": eid, "temperature": level}, temp_intent=hvac)
         if result != _CALL_FAILED:
             _hold_modulated.add(eid)
+            self._note_ramped_ha(eid, level, hvac)
 
     def direct_target(self, mode: str, target: float) -> float:
         """Room target (°C, without offset) a direct-mode device gets while *mode* is active.
@@ -2793,9 +2866,14 @@ class MPCController:
             return 0.0
         return self._head_offsets.offset(eid, intent)
 
-    def _cooling_setpoint_ha(self, eid: str, celsius: float) -> float:
-        """HA-unit proportional AC cooling setpoint in the device's frame, within its range."""
-        ha_t = celsius_to_ha_temp(self.hass, celsius + self._head_offset(eid, "cool"))
+    def _cooling_setpoint_ha(self, eid: str, celsius: float, *, head_offset: float | None = None) -> float:
+        """HA-unit proportional AC cooling setpoint in the device's frame, within its range.
+
+        ``head_offset`` overrides the learned sensor offset. A ramped send already
+        includes it, and adding it again would jump by more than one step.
+        """
+        extra = self._head_offset(eid, "cool") if head_offset is None else head_offset
+        ha_t = celsius_to_ha_temp(self.hass, celsius + extra)
         state = self.hass.states.get(eid)
         if state is None:
             return ha_t
@@ -2849,6 +2927,149 @@ class MPCController:
             cap = math.floor(cap)
         ceiling = max(cap, celsius_to_ha_temp(self.hass, effective_target))
         return min(ha_t, ceiling)
+
+    def _ramp_params(self, eid: str) -> tuple[int, float] | None:
+        """Interval and step for this AC, or None when it is sent the proportional setpoint at once."""
+        if not self.has_external_sensor or eid in self._direct_eids or eid not in self.acs:
+            return None
+        return ramp_config(get_device_by_eid(self._devices, eid))
+
+    def _device_step_celsius(self, eid: str) -> float | None:
+        """The device's setpoint step in °C, so a ramp step still moves a coarse thermostat."""
+        state = self.hass.states.get(eid)
+        if state is None:
+            return None
+        step = _resolve_step(self.hass, state.attributes)
+        if step is None or step <= 0:
+            return None
+        if self.hass.config.units.temperature_unit == UnitOfTemperature.FAHRENHEIT:
+            return step * 5 / 9
+        return float(step)
+
+    async def _async_fine_tune_ac(self, eid: str, targets: TargetTemps, current_temp: float | None) -> bool:
+        """Nudge a ramped AC's setpoint from the room sensor. True when this call owns the device.
+
+        The unit stays in the mode the user set. Only ``heat`` and ``cool`` are trimmed,
+        and only the temperature is sent. Any other mode is left untouched.
+        """
+        params = self._ramp_params(eid)
+        if params is None or self._force_off:
+            return False
+        state = self.hass.states.get(eid)
+        if state is None or state.state not in ("heat", "cool"):
+            return True
+        mode = MODE_HEATING if state.state == "heat" else MODE_COOLING
+        target = targets.heat if mode == MODE_HEATING else targets.cool
+        if target is None or current_temp is None:
+            return True
+        minutes, step = params
+        error = target - current_temp
+        if abs(error) <= step + 1e-9:
+            direction = 0
+        else:
+            direction = 1 if error > 0 else -1
+        limited = self._setpoint_ramp.advance(
+            eid,
+            mode,
+            time.time(),
+            minutes=minutes,
+            step=step,
+            direction=direction,
+            seed=self._device_setpoint_celsius(eid),
+            device_step=self._device_step_celsius(eid),
+        )
+        if limited is None:
+            return True
+        ha_t = self._clamp_ha_setpoint(eid, celsius_to_ha_temp(self.hass, limited))
+        try:
+            clamped = ha_temp_to_celsius(self.hass, ha_t, entity_id=eid)
+        except (TypeError, ValueError):
+            clamped = limited
+        if abs(clamped - limited) > 0.05:
+            self._setpoint_ramp.note(eid, clamped, mode, time.time())
+        await self._call(
+            "set_temperature",
+            {"entity_id": eid, "temperature": ha_t},
+            temp_intent="heat" if mode == MODE_HEATING else "cool",
+        )
+        return True
+
+    def _device_setpoint_celsius(self, eid: str) -> float | None:
+        """The thermostat reading already on the unit, in °C."""
+        state = self.hass.states.get(eid)
+        if state is None:
+            return None
+        raw = state.attributes.get("temperature")
+        try:
+            if raw is None:
+                return None
+            return ha_temp_to_celsius(self.hass, float(raw), entity_id=eid)
+        except (TypeError, ValueError):
+            return None
+
+    def _clamp_ha_setpoint(self, eid: str, ha_value: float) -> float:
+        """Keep a setpoint inside the device's reported min and max."""
+        state = self.hass.states.get(eid)
+        if state is None:
+            return ha_value
+        try:
+            low = state.attributes.get("min_temp")
+            high = state.attributes.get("max_temp")
+            if low is not None:
+                ha_value = max(float(low), ha_value)
+            if high is not None:
+                ha_value = min(float(high), ha_value)
+        except (TypeError, ValueError):
+            return ha_value
+        return ha_value
+
+    def _ac_heat_command(
+        self,
+        eid: str,
+        desired_c: float,
+        effective_target: float,
+        direct_target: float | None,
+        current_temp: float | None,
+        room_target: float,
+    ) -> tuple[float, float | None]:
+        """HA heating setpoint and its deadband."""
+        return (
+            self._heating_setpoint_ha(eid, desired_c, effective_target, direct_target),
+            self._proportional_deadband(eid, current_temp, room_target),
+        )
+
+    def _ac_cool_command(
+        self,
+        eid: str,
+        room_frame_c: float,
+        direct_target: float | None,
+        current_temp: float | None,
+        room_target: float,
+    ) -> tuple[float, float | None]:
+        """HA cooling setpoint and its deadband. Direct devices keep the room target."""
+        direct_t = self._direct_setpoint_ha(eid, direct_target)
+        if direct_t is not None:
+            return direct_t, self._proportional_deadband(eid, current_temp, room_target)
+        return (
+            self._cooling_setpoint_ha(eid, room_frame_c),
+            self._proportional_deadband(eid, current_temp, room_target),
+        )
+
+    def _note_ramped_ha(self, eid: str, ha_value: float, mode: str) -> None:
+        """Keep the ramp aligned with a setpoint a hold sent on its own."""
+        if self._ramp_params(eid) is None:
+            return
+        try:
+            celsius = ha_temp_to_celsius(self.hass, float(ha_value), entity_id=eid)
+        except (TypeError, ValueError):
+            return
+        if mode in (MODE_HEATING, "heat"):
+            intent = MODE_HEATING
+        elif mode in (MODE_COOLING, "cool"):
+            intent = MODE_COOLING
+        else:
+            return
+        self._setpoint_ramp.note(eid, celsius, intent, time.time())
 
     def _proportional_deadband(self, eid: str, current_temp: float | None, effective_target: float) -> float | None:
         """Deadband for a proportional setpoint send; None marks a send that is not proportional.
@@ -2924,6 +3145,7 @@ class MPCController:
                 targets=self._idle_targets,
                 use_setpoint_offset=self.has_external_sensor,
                 head_offset=self._head_offset(eid, "idle"),
+                ramp=self._setpoint_ramp,
                 force_off=self._force_off,
             )
             return _CALL_SKIPPED

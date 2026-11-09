@@ -66,6 +66,8 @@ def _build_device_states(hass: HomeAssistant, devices: list[dict]) -> list[dict[
             "setback_auto_off": dev.get("setback_auto_off", False),
             "setpoint_mode": dev.get("setpoint_mode", "proportional"),
             "setpoint_offset": dev.get("setpoint_offset", 0.0),
+            "setpoint_ramp_minutes": dev.get("setpoint_ramp_minutes", 0),
+            "setpoint_ramp_step": dev.get("setpoint_ramp_step", 0.5),
             "coil_dry": dev.get("coil_dry", "inherit"),
             "coil_dry_minutes": dev.get("coil_dry_minutes", 0),
             "coil_dry_mode": dev.get("coil_dry_mode", ""),
@@ -426,6 +428,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, config_entry: 
         "coil_dry_state": (coordinator._coil_dry_manager.get_state() if coordinator is not None else {}),
         # Live AC sensor offsets {entity: {"heat"|"cool"|"idle": [offset K, readings]}}; settings hold the last save
         "ac_head_offsets": (coordinator._head_offsets.get_state() if coordinator is not None else {}),
+        "ac_setpoint_ramps": (coordinator._setpoint_ramp.get_state() if coordinator is not None else {}),
         "presence": {
             "enabled": settings.get("presence_enabled", False),
             "persons": settings.get("presence_persons", []),

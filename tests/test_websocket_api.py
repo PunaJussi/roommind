@@ -3005,6 +3005,33 @@ async def test_setpoint_offset_schema_default_and_range():
 
 
 @pytest.mark.asyncio
+async def test_setpoint_ramp_schema_defaults_and_range():
+    """Ramp interval is 0 or 5–360 minutes; the step is 0.1–5 °C. TRVs keep the defaults."""
+    import voluptuous as vol
+
+    schema = websocket_save_room._ws_schema
+
+    def _validate(device):
+        return schema({"type": "roommind/rooms/save", "id": 1, "area_id": "lr", "devices": [device]})["devices"][0]
+
+    bare = _validate({"entity_id": "climate.ac", "type": "ac"})
+    assert bare["setpoint_ramp_minutes"] == 0
+    assert bare["setpoint_ramp_step"] == 0.5
+    assert (
+        _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_minutes": 60})["setpoint_ramp_minutes"] == 60
+    )
+    assert _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_step": 1})["setpoint_ramp_step"] == 1.0
+    trv = _validate({"entity_id": "climate.trv", "type": "trv", "setpoint_ramp_minutes": 60, "setpoint_ramp_step": 2})
+    assert trv["setpoint_ramp_minutes"] == 0
+    assert trv["setpoint_ramp_step"] == 0.5
+    for minutes in (1, 4, 361):
+        with pytest.raises(vol.Invalid):
+            _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_minutes": minutes})
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_step": 0.05})
+
+
+@pytest.mark.asyncio
 async def test_coil_dry_rejects_on_for_trv():
     """A TRV has no evaporator coil."""
     import voluptuous as vol

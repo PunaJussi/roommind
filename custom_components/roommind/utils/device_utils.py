@@ -136,6 +136,8 @@ def legacy_to_devices(
                 "idle_action": IDLE_ACTION_OFF,
                 "idle_fan_mode": DEFAULT_IDLE_FAN_MODE,
                 "setpoint_mode": SETPOINT_MODE_PROPORTIONAL,
+                "setpoint_ramp_minutes": 0,
+                "setpoint_ramp_step": 0.5,
                 "coil_dry": COIL_DRY_INHERIT,
                 "coil_dry_minutes": 0,
                 "coil_dry_mode": "",

@@ -32,6 +32,8 @@ from ..const import (
     DEFAULT_OUTDOOR_HEATING_MAX,
     HEATING_BOOST_TARGET,
     HOLD_OVERSHOOT_MARGIN,
+    HYSTERESIS_MAX,
+    HYSTERESIS_MIN,
     MIN_POWER_FRACTION,
     MODE_COOLING,
     MODE_HEATING,
@@ -39,6 +41,8 @@ from ..const import (
     PROPORTIONAL_DEADBAND_C,
     PROPORTIONAL_DEADBAND_NEAR_TARGET_C,
     PROPORTIONAL_SETPOINT_DWELL_SECONDS,
+    SETPOINT_RAMP_MODE_DELTA,
+    SETPOINT_RAMP_STEP_MAX,
     VALVE_OVERSHOOT_STOP_K,
     VALVE_PROPORTIONAL_BAND_K,
     TargetTemps,
@@ -69,7 +73,7 @@ from ..utils.temp_utils import celsius_delta_to_ha, celsius_to_ha_temp, ha_temp_
 from .direct_valve import async_release_valve, async_set_valve, clear_valve_cache
 from .mpc_optimizer import MPCOptimizer, MPCPlan, preheat_max_blocks, slow_start_penalty
 from .residual_heat import get_min_run_blocks, mean_rebound
-from .setpoint_ramp import SetpointRamp, ramp_config
+from .setpoint_ramp import RampConfig, SetpointRamp, ramp_config
 from .thermal_model import RoomModelManager
 
 if TYPE_CHECKING:
@@ -584,8 +588,8 @@ async def async_idle_device(
 ) -> None:
     """Idle a climate device per its configured idle_action.
 
-    ``ramp`` forgets a gradual AC setpoint, so the next run starts from the
-    measured temperature instead of continuing a run that already ended.
+    ``ramp`` forgets a gradual AC setpoint, so the next run seeds from the
+    temperature already on the unit instead of continuing a run that ended.
 
     "off"      -> async_turn_off_climate() (existing behavior)
     "fan_only" -> hvac_mode=fan_only + set_fan_mode(idle_fan_mode)
@@ -988,9 +992,26 @@ def fill_missing_targets(heat: float | None, cool: float | None, fallback: float
     return heat, cool
 
 
-def heat_start_hysteresis(ac_heats: bool, has_trvs: bool) -> float:
+def _clamp_hysteresis(value: Any, default: float) -> float:
+    """Keep a start-band setting inside 0.1–2.0 °C."""
+    try:
+        hyst = float(value)
+    except (TypeError, ValueError):
+        return default
+    if hyst != hyst:
+        return default
+    return min(HYSTERESIS_MAX, max(HYSTERESIS_MIN, round(hyst, 1)))
+
+
+def heat_start_hysteresis(
+    ac_heats: bool,
+    has_trvs: bool,
+    *,
+    heat_hysteresis: float = BANGBANG_HEAT_HYSTERESIS,
+    mpc_start_hysteresis: float = MPC_START_HYSTERESIS,
+) -> float:
     """Distance below the heat target a fast heating run starts at (see MPC_START_HYSTERESIS)."""
-    return BANGBANG_HEAT_HYSTERESIS if ac_heats or not has_trvs else MPC_START_HYSTERESIS
+    return heat_hysteresis if ac_heats or not has_trvs else mpc_start_hysteresis
 
 
 def is_valve_modulating(devices: list[dict], acs_can_heat: bool, has_external_sensor: bool) -> bool:
@@ -1094,6 +1115,7 @@ def decide_mpc_action(
     continuation_power: Callable[[str, float], float],
     area_id: str | None = None,
     valve_demand: Callable[[float], float] | None = None,
+    cool_hysteresis: float = MPC_START_HYSTERESIS,
 ) -> tuple[str, float]:
     """Apply the controller's rules to the optimizer's first block.
 
@@ -1177,7 +1199,7 @@ def decide_mpc_action(
                 return MODE_IDLE, 0.0
     elif action == MODE_COOLING:
         if previous_mode != MODE_COOLING and not cool_falling:
-            if current_temp < cool_now + MPC_START_HYSTERESIS + _TEMP_EPSILON:
+            if current_temp < cool_now + cool_hysteresis + _TEMP_EPSILON:
                 return MODE_IDLE, 0.0
     elif (
         not slow_heat
@@ -1396,6 +1418,9 @@ class MPCController:
         cw = s.get("comfort_weight", 70)
         self._w_comfort = max(1.0, cw / 10.0)
         self._w_energy = max(1.0, (100 - cw) / 10.0)
+        self._heat_hysteresis = _clamp_hysteresis(s.get("heat_hysteresis"), BANGBANG_HEAT_HYSTERESIS)
+        self._cool_hysteresis = _clamp_hysteresis(s.get("cool_hysteresis"), BANGBANG_COOL_HYSTERESIS)
+        self._mpc_start_hysteresis = _clamp_hysteresis(s.get("mpc_start_hysteresis"), MPC_START_HYSTERESIS)
         self._preheat_max_blocks = preheat_max_blocks(
             cw, PLAN_DT_MINUTES, enabled=room_config.get("preheat_enabled", True)
         )
@@ -1742,8 +1767,12 @@ class MPCController:
                 can_heat=can_heat,
                 can_cool=can_cool,
                 heat_hysteresis=heat_start_hysteresis(
-                    check_acs_can_heat(self.hass, self.room_config), bool(self.thermostats)
+                    check_acs_can_heat(self.hass, self.room_config),
+                    bool(self.thermostats),
+                    heat_hysteresis=self._heat_hysteresis,
+                    mpc_start_hysteresis=self._mpc_start_hysteresis,
                 ),
+                cool_hysteresis=self._mpc_start_hysteresis,
                 idle_drift=lambda minutes: self._predict_idle_drift(current_temp, minutes),
                 continuation_power=partial(self._gentle_power, optimizer, current_temp, outdoor_now),
                 area_id=self._area_id,
@@ -1837,10 +1866,10 @@ class MPCController:
             return MODE_IDLE
 
         # From idle: threshold to start
-        if can_heat and heat_target is not None and current_temp < heat_target - BANGBANG_HEAT_HYSTERESIS:
+        if can_heat and heat_target is not None and current_temp < heat_target - self._heat_hysteresis:
             return MODE_HEATING
 
-        if can_cool and cool_target is not None and current_temp > cool_target + BANGBANG_COOL_HYSTERESIS:
+        if can_cool and cool_target is not None and current_temp > cool_target + self._cool_hysteresis:
             return MODE_COOLING
 
         return MODE_IDLE
@@ -2234,7 +2263,7 @@ class MPCController:
                     # setpoint unless the target changed on purpose (#436). A device
                     # that reports off (state lag or switched off by hand) is not
                     # switched on again. A trimmed AC keeps nudging its setpoint.
-                    if await self._async_fine_tune_ac(cmd.entity_id, targets, current_temp):
+                    if await self._async_fine_tune_ac(cmd.entity_id, targets, current_temp, MODE_HEATING):
                         continue
                     _LOGGER.debug(
                         "Area '%s': keeping '%s' active (compressor min-run protection)",
@@ -2278,7 +2307,7 @@ class MPCController:
                             deadband=self._proportional_deadband(cmd.entity_id, current_temp, effective_target),
                         )
                     else:  # ac
-                        if await self._async_fine_tune_ac(cmd.entity_id, targets, current_temp):
+                        if await self._async_fine_tune_ac(cmd.entity_id, targets, current_temp, MODE_HEATING):
                             continue
                         if self.has_external_sensor and current_temp is not None:
                             t = round(
@@ -2408,7 +2437,7 @@ class MPCController:
                         ramp=self._setpoint_ramp,
                     )
                     continue
-                if await self._async_fine_tune_ac(eid, targets, current_temp):
+                if await self._async_fine_tune_ac(eid, targets, current_temp, MODE_HEATING):
                     continue
                 shift = self._head_offset(eid, "heat")
                 ha_t, ac_deadband = self._ac_heat_command(
@@ -2462,7 +2491,7 @@ class MPCController:
                         ramp=self._setpoint_ramp,
                     )
                     continue
-                if await self._async_fine_tune_ac(eid, targets, current_temp):
+                if await self._async_fine_tune_ac(eid, targets, current_temp, MODE_COOLING):
                     continue
                 ha_t, ac_deadband = self._ac_cool_command(
                     eid, ac_cool_target, direct_target, current_temp, effective_target
@@ -2492,8 +2521,6 @@ class MPCController:
                 await self._async_release_valve(eid)
         elif mode == MODE_IDLE:
             for eid in thermostats + acs:
-                if await self._async_fine_tune_ac(eid, targets, current_temp):
-                    continue
                 if eid in _forced_on:
                     # Compressor min-run: keep the device running. Its last active
                     # setpoint does that; falling back to the room target at once
@@ -2928,8 +2955,8 @@ class MPCController:
         ceiling = max(cap, celsius_to_ha_temp(self.hass, effective_target))
         return min(ha_t, ceiling)
 
-    def _ramp_params(self, eid: str) -> tuple[int, float] | None:
-        """Interval and step for this AC, or None when it is sent the proportional setpoint at once."""
+    def _ramp_params(self, eid: str) -> RampConfig | None:
+        """Ramp settings for this AC, or None when it is sent the proportional setpoint at once."""
         if not self.has_external_sensor or eid in self._direct_eids or eid not in self.acs:
             return None
         return ramp_config(get_device_by_eid(self._devices, eid))
@@ -2946,34 +2973,65 @@ class MPCController:
             return step * 5 / 9
         return float(step)
 
-    async def _async_fine_tune_ac(self, eid: str, targets: TargetTemps, current_temp: float | None) -> bool:
+    def _ramp_hvac_mode(self, eid: str, room_mode: str) -> str:
+        """HVAC mode a ramped AC should run in for *room_mode*, or empty if it cannot."""
+        ac_modes = _effective_ac_modes(self.hass.states.get(eid))
+        if room_mode == MODE_HEATING:
+            if "heat" in ac_modes:
+                return "heat"
+            if "heat_cool" in ac_modes:
+                return "heat_cool"
+            if "auto" in ac_modes:
+                return "auto"
+            return ""
+        if "cool" in ac_modes:
+            return "cool"
+        if "heat_cool" in ac_modes:
+            return "heat_cool"
+        if "auto" in ac_modes:
+            return "auto"
+        return ""
+
+    async def _async_fine_tune_ac(
+        self, eid: str, targets: TargetTemps, current_temp: float | None, room_mode: str
+    ) -> bool:
         """Nudge a ramped AC's setpoint from the room sensor. True when this call owns the device.
 
-        The unit stays in the mode the user set. Only ``heat`` and ``cool`` are trimmed,
-        and only the temperature is sent. Any other mode is left untouched.
+        Owns the device for the whole heating or cooling run so the proportional
+        max-setpoint is never sent. Puts a fan-only unit into heat/cool. Idle
+        is left to ``async_idle_device``.
         """
         params = self._ramp_params(eid)
-        if params is None or self._force_off:
+        if params is None or self._force_off or room_mode not in (MODE_HEATING, MODE_COOLING):
             return False
-        state = self.hass.states.get(eid)
-        if state is None or state.state not in ("heat", "cool"):
+        ac_mode = self._ramp_hvac_mode(eid, room_mode)
+        if not ac_mode:
             return True
-        mode = MODE_HEATING if state.state == "heat" else MODE_COOLING
-        target = targets.heat if mode == MODE_HEATING else targets.cool
+        state = self.hass.states.get(eid)
+        if state is None:
+            return True
+        if state.state != ac_mode:
+            await self._call("set_hvac_mode", {"entity_id": eid, "hvac_mode": ac_mode})
+        target = targets.heat if room_mode == MODE_HEATING else targets.cool
         if target is None or current_temp is None:
             return True
-        minutes, step = params
         error = target - current_temp
-        if abs(error) <= step + 1e-9:
+        if params.mode == SETPOINT_RAMP_MODE_DELTA:
+            band = params.deadband
+            stride = min(abs(error), SETPOINT_RAMP_STEP_MAX)
+        else:
+            band = params.step
+            stride = params.step
+        if abs(error) <= band + 1e-9:
             direction = 0
         else:
             direction = 1 if error > 0 else -1
         limited = self._setpoint_ramp.advance(
             eid,
-            mode,
+            room_mode,
             time.time(),
-            minutes=minutes,
-            step=step,
+            minutes=params.minutes,
+            step=stride,
             direction=direction,
             seed=self._device_setpoint_celsius(eid),
             device_step=self._device_step_celsius(eid),
@@ -2986,11 +3044,11 @@ class MPCController:
         except (TypeError, ValueError):
             clamped = limited
         if abs(clamped - limited) > 0.05:
-            self._setpoint_ramp.note(eid, clamped, mode, time.time())
+            self._setpoint_ramp.note(eid, clamped, room_mode, time.time())
         await self._call(
             "set_temperature",
             {"entity_id": eid, "temperature": ha_t},
-            temp_intent="heat" if mode == MODE_HEATING else "cool",
+            temp_intent="heat" if room_mode == MODE_HEATING else "cool",
         )
         return True
 

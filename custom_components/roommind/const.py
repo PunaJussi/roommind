@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.8.2.1"
+VERSION = "1.8.2.4"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -83,6 +83,10 @@ MAX_TARGET_TEMP = 35.0
 # Smart control defaults
 BANGBANG_HEAT_HYSTERESIS = 0.2  # °C below target → start heating (bang-bang fallback)
 BANGBANG_COOL_HYSTERESIS = 0.2  # °C above target → start cooling (bang-bang fallback)
+HYSTERESIS_MIN = 0.1
+HYSTERESIS_MAX = 2.0
+# ENERGY Period (and similar) below this means the compressor is not running
+COMPRESSOR_RUN_MIN = 1.0
 DEFAULT_OUTDOOR_COOLING_MIN = 16  # Hard block: NEVER cool if outdoor < this
 DEFAULT_OUTDOOR_HEATING_MAX = 22  # Don't heat if outdoor > this
 HEATING_BOOST_TARGET = 30  # Fallback TRV heating boost (used when entity max_temp unavailable)
@@ -103,6 +107,14 @@ SETPOINT_RAMP_MINUTES_DEFAULT = 60  # Suggested interval when the user turns the
 SETPOINT_RAMP_STEP_MIN = 0.1  # °C
 SETPOINT_RAMP_STEP_MAX = 5.0  # °C
 SETPOINT_RAMP_STEP_DEFAULT = 0.5  # °C moved toward the proportional setpoint per interval
+SETPOINT_RAMP_MODE_FIXED = "fixed"
+SETPOINT_RAMP_MODE_DELTA = "delta"
+SETPOINT_RAMP_MODES = (SETPOINT_RAMP_MODE_FIXED, SETPOINT_RAMP_MODE_DELTA)
+SETPOINT_RAMP_MODE_DEFAULT = SETPOINT_RAMP_MODE_FIXED
+SETPOINT_RAMP_DEADBAND_MIN = SETPOINT_RAMP_STEP_MIN
+SETPOINT_RAMP_DEADBAND_MAX = SETPOINT_RAMP_STEP_MAX
+SETPOINT_RAMP_DEADBAND_DEFAULT = SETPOINT_RAMP_STEP_DEFAULT
+SETPOINT_RAMP_OFFSET_MAX = 3.0  # °C the ramped setpoint may sit above/below the room target
 BOOST_CAP_FALLBACK_STEP = 0.5  # Distance kept below a device's max_temp for proportional heating setpoints when it reports no target_temp_step (#396)
 # Direct valve control (#413): TRVs whose valve opening RoomMind sets through number entities
 VALVE_DWELL_SECONDS = 600  # Minimum time a valve position stays before a small correction moves the motor again

@@ -1,0 +1,31 @@
+---
+description: PunaJussin RoomMind-forkki, päivitykset ja deploy — älä asenna virallista RoomMindiä
+alwaysApply: true
+---
+
+# Tämä on forkki, ei virallinen RoomMind
+
+- GitHub: https://github.com/PunaJussi/roommind (julkinen forkki, parent `snazzybean/roommind`)
+- `origin` = PunaJussi/roommind. `upstream` = snazzybean/roommind.
+- Älä pushaa `upstreamiin`. Älä paina Cursorsin **Publish Branch** (menisi snazzybeanille).
+- Versio HA:ssa: **1.8.2.4**. Virallinen on v1.8.2; neljäs numero erottaa HACS-päivityksen.
+- Kieli käyttäjälle: suomi.
+
+## Älä ylikirjoita
+
+- `update.roommind_update` on kytketty pois (`disabled_by: user`). Älä ota päälle äläkä asenna Marketplace/HACS-virallista RoomMindiä.
+- README:n HACS-ohje viittaa snazzybeaniin — älä seuraa sitä tässä asennuksessa.
+- Agent Review “fine-tune prevents apply/idle” ei ole bugi: Gradual thermostat omistaa AC:n heat/cool/idle-tilassa.
+
+## Uusi virallinen RoomMind-versio
+
+1. `git fetch upstream` ja rebase/merge `upstream/main` (tai tagi) `origin/main` päälle.
+2. Säilytä `SetpointRamp` / Gradual thermostat; älä pudota DeviceSetpointTrackeria.
+3. Nosta versio (`const.py` VERSION + `manifest.json`), esim. 1.8.3 → **1.8.3.1**.
+4. Testit + `frontend` build (`roommind-panel.js` cache-bust `?v={VERSION}`).
+5. Push `origin`, GitHub Release + zip. Deploy HA:han SSH:lla (SFTP pois; tar stdin; kohde `/homeassistant/custom_components/roommind`). Älä commitoi `_deploy_ha.py` / `roommind.zip`.
+6. HA-core/OS-päivitykset saa asentaa normaalisti.
+
+## Ominaisuus
+
+Gradual thermostat: `custom_components/roommind/control/setpoint_ramp.py`. Käyttäjädok: `docs/control-and-devices.md` (kohta Gradual thermostat).

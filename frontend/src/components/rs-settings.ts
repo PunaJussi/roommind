@@ -48,6 +48,9 @@ export class RsSettings extends LitElement {
   @state() private _outdoorHeatingMax = 22;
   @state() private _controlMode: "mpc" | "bangbang" = "mpc";
   @state() private _comfortWeight = 70;
+  @state() private _heatHysteresis = 0.2;
+  @state() private _coolHysteresis = 0.2;
+  @state() private _mpcStartHysteresis = 0.1;
   @state() private _weatherEntity = "";
   @state() private _outdoorUnavailableNotify = true;
   @state() private _predictionEnabled = true;
@@ -111,6 +114,9 @@ export class RsSettings extends LitElement {
       this._outdoorHeatingMax = s.outdoor_heating_max ?? 22;
       this._controlMode = s.control_mode ?? "mpc";
       this._comfortWeight = s.comfort_weight ?? 70;
+      this._heatHysteresis = s.heat_hysteresis ?? 0.2;
+      this._coolHysteresis = s.cool_hysteresis ?? 0.2;
+      this._mpcStartHysteresis = s.mpc_start_hysteresis ?? 0.1;
       this._weatherEntity = s.weather_entity ?? "";
       this._outdoorUnavailableNotify = s.outdoor_unavailable_notify ?? true;
       this._predictionEnabled = s.prediction_enabled ?? true;
@@ -233,6 +239,9 @@ export class RsSettings extends LitElement {
           .hass=${this.hass}
           .controlMode=${this._controlMode}
           .comfortWeight=${this._comfortWeight}
+          .heatHysteresis=${this._heatHysteresis}
+          .coolHysteresis=${this._coolHysteresis}
+          .mpcStartHysteresis=${this._mpcStartHysteresis}
           .outdoorCoolingMin=${this._outdoorCoolingMin}
           .outdoorHeatingMax=${this._outdoorHeatingMax}
           .predictionEnabled=${this._predictionEnabled}
@@ -430,6 +439,9 @@ export class RsSettings extends LitElement {
         outdoor_heating_max: this._outdoorHeatingMax,
         control_mode: this._controlMode,
         comfort_weight: this._comfortWeight,
+        heat_hysteresis: this._heatHysteresis,
+        cool_hysteresis: this._coolHysteresis,
+        mpc_start_hysteresis: this._mpcStartHysteresis,
         weather_entity: this._weatherEntity,
         outdoor_unavailable_notify: this._outdoorUnavailableNotify,
         prediction_enabled: this._predictionEnabled,

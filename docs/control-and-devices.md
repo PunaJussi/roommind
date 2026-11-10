@@ -111,18 +111,30 @@ In `Proportional` mode the boosted heating setpoint stays one step (`target_temp
 
 #### Gradual thermostat
 
-The heat pump's own thermostat runs the compressor. The sensor inside the indoor unit only roughly follows the air in the room, and the gap changes with the outdoor temperature. `Gradual thermostat` trims the setpoint the user left on the unit, from the room sensor, at most one step per interval. You switch the unit between heating and cooling yourself. RoomMind does not change that mode.
+The heat pump's own thermostat runs the compressor. The sensor inside the indoor unit only roughly follows the air in the room, and the gap changes with the outdoor temperature. `Gradual thermostat` trims the unit's setpoint from the room sensor, at most once per interval. This is an add-on in `Proportional` mode: it does **not** send the boosted max setpoint (around 30 °C). That boost is not wanted on a heat pump.
 
 The fields are on the device, in the room's device editor, for a climate device in `Proportional` mode in a room with an external temperature sensor:
 
-- `Adjustment interval`: 5 to 360 minutes. 60 minutes is a calm start. 0 minutes, the default, leaves the unit alone.
-- `Maximum step`: 0.1 to 5 °C. 0.5 °C is a calm start. A device that only accepts whole degrees still moves by at least its own `target_temp_step`.
+- `Adjustment interval`: 5 to 360 minutes. 60 minutes is a calm start. 0 minutes, the default, leaves the original Proportional boost in place.
+- `Step mode`: `Fixed step` or `Delta step`. Fixed is the default.
+- `Maximum step` (Fixed step): 0.1 to 5 °C. 0.5 °C is a calm start. A device that only accepts whole degrees still moves by at least its own `target_temp_step`.
+- `Deadband` (Delta step): 0.1 to 5 °C. 0.5 °C is a calm start. No setpoint change while the room is this close to the target.
 
-While the unit is in `heat` or `cool`, RoomMind sends only a temperature. The room more than one step below the target raises it; more than one step above lowers it. Cooling uses the cooling target and the same rule. Within one step of the target the last value stays, so the unit's own sensor can sit several degrees away from the room. That settled value is what compensates for the outdoor-dependent sensor gap. There is no separate outdoor curve.
+When the room is colder than the target, RoomMind puts the unit in `heat` and raises the setpoint already on the unit. Fixed step always moves one maximum step. Delta step moves by the room's distance from the target (capped at 5 °C), so a larger gap means a larger change. When the room is warmer, it lowers the setpoint. Cooling uses the cooling target the same way. Inside the deadband (Fixed: the same as the step; Delta: the Deadband field) the last value stays, so the unit's own sensor can sit several degrees away from the room. That settled value is what compensates for the outdoor-dependent sensor gap. There is no separate outdoor curve.
 
-The trim keeps going when the room is satisfied. `When idle` does not switch the unit off. A unit that is off, or in fan or dry mode, is left as it is until you put it back in heating or cooling. The last setpoint is remembered across that, and across a restart. The first value, when nothing has been remembered yet, is the temperature already set on the unit.
+When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. Gradual does not keep `heat` on. A later heating run continues from the setpoint on the unit, not from the boosted max.
+
+`Compressor run sensor` (optional): a sensor such as ENERGY Period, used when the climate entity does not report `hvac_action`. A value below 1 means the compressor is off. RoomMind uses this to train Intelligent control. It does not keep heating on at the target.
 
 A schedule or away action that turns the room off, an open window, climate control switched off, and coil drying still stop the unit at once. The setting has no effect in `Direct` mode, on radiator valves, or in Managed mode.
+
+#### Start band
+
+In Settings → Control, three fields set how far the room may drift before a run starts:
+
+- Heating (default 0.2 °C): Simple control and heat pumps.
+- Cooling (default 0.2 °C).
+- Intelligent (default 0.1 °C): how far from the target MPC waits before starting a run. Not Direct, and not a radiator-only setting.
 
 ## Direct Valve Control (TRVs)
 

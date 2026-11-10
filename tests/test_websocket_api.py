@@ -3006,7 +3006,7 @@ async def test_setpoint_offset_schema_default_and_range():
 
 @pytest.mark.asyncio
 async def test_setpoint_ramp_schema_defaults_and_range():
-    """Ramp interval is 0 or 5–360 minutes; the step is 0.1–5 °C. TRVs keep the defaults."""
+    """Ramp interval is 0 or 5–360 minutes; step/deadband 0.1–5 °C; mode fixed|delta. TRVs keep the defaults."""
     import voluptuous as vol
 
     schema = websocket_save_room._ws_schema
@@ -3017,18 +3017,71 @@ async def test_setpoint_ramp_schema_defaults_and_range():
     bare = _validate({"entity_id": "climate.ac", "type": "ac"})
     assert bare["setpoint_ramp_minutes"] == 0
     assert bare["setpoint_ramp_step"] == 0.5
+    assert bare["setpoint_ramp_mode"] == "fixed"
+    assert bare["setpoint_ramp_deadband"] == 0.5
     assert (
         _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_minutes": 60})["setpoint_ramp_minutes"] == 60
     )
     assert _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_step": 1})["setpoint_ramp_step"] == 1.0
-    trv = _validate({"entity_id": "climate.trv", "type": "trv", "setpoint_ramp_minutes": 60, "setpoint_ramp_step": 2})
+    assert _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_mode": "delta"})["setpoint_ramp_mode"] == "delta"
+    assert _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_deadband": 1})["setpoint_ramp_deadband"] == 1.0
+    trv = _validate(
+        {
+            "entity_id": "climate.trv",
+            "type": "trv",
+            "setpoint_ramp_minutes": 60,
+            "setpoint_ramp_step": 2,
+            "setpoint_ramp_mode": "delta",
+            "setpoint_ramp_deadband": 2,
+        }
+    )
     assert trv["setpoint_ramp_minutes"] == 0
     assert trv["setpoint_ramp_step"] == 0.5
+    assert trv["setpoint_ramp_mode"] == "fixed"
+    assert trv["setpoint_ramp_deadband"] == 0.5
     for minutes in (1, 4, 361):
         with pytest.raises(vol.Invalid):
             _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_minutes": minutes})
     with pytest.raises(vol.Invalid):
         _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_step": 0.05})
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_mode": "linear"})
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "setpoint_ramp_deadband": 0.05})
+
+
+@pytest.mark.asyncio
+async def test_compressor_run_sensor_schema():
+    """A compressor-run sensor is optional on ACs and must be a sensor entity. TRVs drop it."""
+    import voluptuous as vol
+
+    schema = websocket_save_room._ws_schema
+
+    def _validate(device):
+        return schema({"type": "roommind/rooms/save", "id": 1, "area_id": "lr", "devices": [device]})["devices"][0]
+
+    bare = _validate({"entity_id": "climate.ac", "type": "ac"})
+    assert bare["compressor_run_sensor"] == ""
+    assert (
+        _validate(
+            {
+                "entity_id": "climate.ac",
+                "type": "ac",
+                "compressor_run_sensor": "sensor.ilmalampopumppu_energy_period",
+            }
+        )["compressor_run_sensor"]
+        == "sensor.ilmalampopumppu_energy_period"
+    )
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "compressor_run_sensor": "binary_sensor.running"})
+    trv = _validate(
+        {
+            "entity_id": "climate.trv",
+            "type": "trv",
+            "compressor_run_sensor": "sensor.energy_period",
+        }
+    )
+    assert trv["compressor_run_sensor"] == ""
 
 
 @pytest.mark.asyncio
@@ -3141,6 +3194,36 @@ async def test_save_settings_persists_coil_dry_keys(ws_hass, store, connection):
     assert settings["coil_dry_fan_mode"] == "high"
     assert settings["coil_dry_min_cooling_minutes"] == 15
     assert settings["coil_dry_drain_minutes"] == 5
+
+
+@pytest.mark.asyncio
+async def test_save_settings_persists_hysteresis_keys(ws_hass, store, connection):
+    """settings/save must persist the start-band fields, not only accept them on the schema."""
+    import voluptuous as vol
+
+    schema = websocket_save_settings._ws_schema
+    schema({"type": "roommind/settings/save", "id": 1, "heat_hysteresis": 0.2, "cool_hysteresis": 0.2, "mpc_start_hysteresis": 0.1})
+    with pytest.raises(vol.Invalid):
+        schema({"type": "roommind/settings/save", "id": 1, "heat_hysteresis": 0.05})
+    with pytest.raises(vol.Invalid):
+        schema({"type": "roommind/settings/save", "id": 1, "mpc_start_hysteresis": 2.5})
+
+    await store.async_load()
+    await _save_settings(
+        ws_hass,
+        connection,
+        {
+            "id": 6,
+            "type": "roommind/settings/save",
+            "heat_hysteresis": 0.3,
+            "cool_hysteresis": 0.4,
+            "mpc_start_hysteresis": 0.2,
+        },
+    )
+    settings = connection.send_result.call_args[0][1]["settings"]
+    assert settings["heat_hysteresis"] == 0.3
+    assert settings["cool_hysteresis"] == 0.4
+    assert settings["mpc_start_hysteresis"] == 0.2
 
 
 @pytest.mark.asyncio

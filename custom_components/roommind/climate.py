@@ -587,7 +587,7 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
             # HA passes it through unchecked here, unlike the set_hvac_mode service
             if hvac_mode not in self.hvac_modes:
                 raise ServiceValidationError(f"{self.entity_id} does not support hvac_mode {hvac_mode}")
-            await self.async_set_hvac_mode(hvac_mode)
+            await self.async_set_hvac_mode(hvac_mode, enable_control=False)
         if self._already_in_force(kwargs):
             return
         room = self._room()
@@ -616,7 +616,7 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
-    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode, *, enable_control: bool = True) -> None:
         """Off switches the room's devices off and stops control; heat/cool/heat_cool pick the climate mode."""
         if self._room().get("is_outdoor", False):
             return
@@ -624,7 +624,9 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
             await self.coordinator.async_turn_room_off(self._area_id)
             self.async_write_ha_state()
             return
-        changes: dict[str, Any] = {"climate_control_enabled": True}
+        changes: dict[str, Any] = {}
+        if enable_control:
+            changes["climate_control_enabled"] = True
         climate_mode = _HVAC_TO_CLIMATE_MODE.get(hvac_mode)
         if climate_mode is not None:
             changes["climate_mode"] = climate_mode
@@ -635,6 +637,8 @@ class RoomMindRoomClimate(CoordinatorEntity, ClimateEntity):
                 if climate_mode == CLIMATE_MODE_AUTO:
                     heat, cool = _fill_auto_band(heat, cool, room)
                 changes["override_heat"], changes["override_cool"] = mask_override_band(heat, cool, climate_mode)
+        if not changes:
+            return
         await self._store().async_update_room(self._area_id, changes)
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()

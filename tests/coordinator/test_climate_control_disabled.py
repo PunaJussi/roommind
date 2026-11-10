@@ -395,6 +395,43 @@ class TestClimateControlDisabled:
         hass.states.get = MagicMock(return_value=s)
         assert coordinator._observe_device_action(room) == ("heating", 1.0)
 
+        # No hvac_action, ENERGY Period ≥ 1 → heating; below 1 → idle
+        ac_room = {
+            **room,
+            "thermostats": [],
+            "acs": ["climate.ac"],
+            "devices": [
+                {
+                    "entity_id": "climate.ac",
+                    "type": "ac",
+                    "compressor_run_sensor": "sensor.energy_period",
+                }
+            ],
+        }
+
+        def _states(period, hvac="heat"):
+            def get(eid):
+                if eid == "climate.ac":
+                    st = MagicMock()
+                    st.state = hvac
+                    st.attributes = {}
+                    return st
+                if eid == "sensor.energy_period":
+                    st = MagicMock()
+                    st.state = period
+                    st.attributes = {}
+                    return st
+                return None
+
+            return get
+
+        hass.states.get = MagicMock(side_effect=_states("2"))
+        assert coordinator._observe_device_action(ac_room) == ("heating", 1.0)
+        hass.states.get = MagicMock(side_effect=_states("0.5"))
+        assert coordinator._observe_device_action(ac_room) == ("idle", 0.0)
+        hass.states.get = MagicMock(side_effect=_states("3", hvac="cool"))
+        assert coordinator._observe_device_action(ac_room) == ("cooling", 1.0)
+
 
 class TestCoverageGaps:
     """Tests covering uncovered coordinator lines."""

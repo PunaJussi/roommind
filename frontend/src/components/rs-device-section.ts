@@ -1067,28 +1067,99 @@ export class RsDeviceSection extends LitElement {
                                 ></rs-info-icon>
                               </div>
                               <div class="detail-field with-info">
-                                <ha-textfield
-                                  .label=${localize("devices.setpoint_ramp_step", lang)}
-                                  .suffix=${tempUnit(this.hass)}
-                                  .value=${String(
-                                    Math.round(
-                                      toDisplayDelta(device.setpoint_ramp_step ?? 0.5, this.hass) *
-                                        10,
-                                    ) / 10,
-                                  )}
-                                  type="number"
-                                  .step=${usesFahrenheit(this.hass) ? "0.5" : "0.1"}
-                                  .min=${String(toDisplayDelta(0.1, this.hass))}
-                                  .max=${String(toDisplayDelta(5, this.hass))}
-                                  @change=${(e: Event) => {
-                                    const v = parseFloat((e.target as HTMLInputElement).value);
-                                    if (!isNaN(v)) this._onRampStepChange(entityId, v);
-                                  }}
-                                ></ha-textfield>
+                                <ha-select
+                                  .label=${localize("devices.setpoint_ramp_mode", lang)}
+                                  .value=${device.setpoint_ramp_mode ?? "fixed"}
+                                  .options=${[
+                                    {
+                                      value: "fixed",
+                                      label: localize("devices.setpoint_ramp_mode_fixed", lang),
+                                    },
+                                    {
+                                      value: "delta",
+                                      label: localize("devices.setpoint_ramp_mode_delta", lang),
+                                    },
+                                  ]}
+                                  @selected=${(e: Event) =>
+                                    this._onRampModeChange(entityId, getSelectValue(e))}
+                                  @closed=${(e: Event) => e.stopPropagation()}
+                                  fixedMenuPosition
+                                >
+                                  <ha-list-item value="fixed"
+                                    >${localize("devices.setpoint_ramp_mode_fixed", lang)}</ha-list-item
+                                  >
+                                  <ha-list-item value="delta"
+                                    >${localize("devices.setpoint_ramp_mode_delta", lang)}</ha-list-item
+                                  >
+                                </ha-select>
                                 <rs-info-icon
-                                  .text=${localize("devices.setpoint_ramp_step_hint", lang)}
+                                  .text=${localize("devices.setpoint_ramp_mode_hint", lang)}
                                 ></rs-info-icon>
                               </div>
+                              ${
+                                (device.setpoint_ramp_mode ?? "fixed") === "delta"
+                                  ? html`
+                                      <div class="detail-field with-info">
+                                        <ha-textfield
+                                          .label=${localize("devices.setpoint_ramp_deadband", lang)}
+                                          .suffix=${tempUnit(this.hass)}
+                                          .value=${String(
+                                            Math.round(
+                                              toDisplayDelta(
+                                                device.setpoint_ramp_deadband ?? 0.5,
+                                                this.hass,
+                                              ) * 10,
+                                            ) / 10,
+                                          )}
+                                          type="number"
+                                          .step=${usesFahrenheit(this.hass) ? "0.5" : "0.1"}
+                                          .min=${String(toDisplayDelta(0.1, this.hass))}
+                                          .max=${String(toDisplayDelta(5, this.hass))}
+                                          @change=${(e: Event) => {
+                                            const v = parseFloat(
+                                              (e.target as HTMLInputElement).value,
+                                            );
+                                            if (!isNaN(v)) this._onRampDeadbandChange(entityId, v);
+                                          }}
+                                        ></ha-textfield>
+                                        <rs-info-icon
+                                          .text=${localize(
+                                            "devices.setpoint_ramp_deadband_hint",
+                                            lang,
+                                          )}
+                                        ></rs-info-icon>
+                                      </div>
+                                    `
+                                  : html`
+                                      <div class="detail-field with-info">
+                                        <ha-textfield
+                                          .label=${localize("devices.setpoint_ramp_step", lang)}
+                                          .suffix=${tempUnit(this.hass)}
+                                          .value=${String(
+                                            Math.round(
+                                              toDisplayDelta(
+                                                device.setpoint_ramp_step ?? 0.5,
+                                                this.hass,
+                                              ) * 10,
+                                            ) / 10,
+                                          )}
+                                          type="number"
+                                          .step=${usesFahrenheit(this.hass) ? "0.5" : "0.1"}
+                                          .min=${String(toDisplayDelta(0.1, this.hass))}
+                                          .max=${String(toDisplayDelta(5, this.hass))}
+                                          @change=${(e: Event) => {
+                                            const v = parseFloat(
+                                              (e.target as HTMLInputElement).value,
+                                            );
+                                            if (!isNaN(v)) this._onRampStepChange(entityId, v);
+                                          }}
+                                        ></ha-textfield>
+                                        <rs-info-icon
+                                          .text=${localize("devices.setpoint_ramp_step_hint", lang)}
+                                        ></rs-info-icon>
+                                      </div>
+                                    `
+                              }
                             `
                           : nothing
                       }
@@ -1120,6 +1191,25 @@ export class RsDeviceSection extends LitElement {
                       `
                     : nothing
               }
+            `
+          : nothing
+      }
+      ${
+        isAc
+          ? html`
+              <div class="detail-field with-info">
+                <ha-entity-picker
+                  .hass=${this.hass}
+                  .includeDomains=${["sensor"]}
+                  .value=${device.compressor_run_sensor ?? ""}
+                  .label=${localize("devices.compressor_run_sensor", lang)}
+                  @value-changed=${(e: CustomEvent) =>
+                    this._onCompressorRunSensorChange(entityId, (e.detail.value as string) || "")}
+                ></ha-entity-picker>
+                <rs-info-icon
+                  .text=${localize("devices.compressor_run_sensor_hint", lang)}
+                ></rs-info-icon>
+              </div>
             `
           : nothing
       }
@@ -1347,6 +1437,8 @@ export class RsDeviceSection extends LitElement {
           ...d,
           setpoint_ramp_minutes: enabled ? d.setpoint_ramp_minutes || 60 : 0,
           setpoint_ramp_step: d.setpoint_ramp_step ?? 0.5,
+          setpoint_ramp_mode: d.setpoint_ramp_mode ?? "fixed",
+          setpoint_ramp_deadband: d.setpoint_ramp_deadband ?? 0.5,
         };
       }),
     );
@@ -1361,6 +1453,29 @@ export class RsDeviceSection extends LitElement {
     );
   }
 
+  private _onCompressorRunSensorChange(entityId: string, sensor: string): void {
+    this._fireDeviceChanged(
+      this.devices.map((d) =>
+        d.entity_id === entityId ? { ...d, compressor_run_sensor: sensor } : d,
+      ),
+    );
+  }
+
+  private _onRampModeChange(entityId: string, mode: string): void {
+    if (mode !== "fixed" && mode !== "delta") return;
+    this._fireDeviceChanged(
+      this.devices.map((d) => {
+        if (d.entity_id !== entityId) return d;
+        return {
+          ...d,
+          setpoint_ramp_mode: mode,
+          setpoint_ramp_step: d.setpoint_ramp_step ?? 0.5,
+          setpoint_ramp_deadband: d.setpoint_ramp_deadband ?? 0.5,
+        };
+      }),
+    );
+  }
+
   private _onRampStepChange(entityId: string, displayValue: number): void {
     const celsius = Math.max(
       0.1,
@@ -1369,6 +1484,18 @@ export class RsDeviceSection extends LitElement {
     this._fireDeviceChanged(
       this.devices.map((d) =>
         d.entity_id === entityId ? { ...d, setpoint_ramp_step: celsius } : d,
+      ),
+    );
+  }
+
+  private _onRampDeadbandChange(entityId: string, displayValue: number): void {
+    const celsius = Math.max(
+      0.1,
+      Math.min(5, Math.round(toCelsiusDelta(displayValue, this.hass) * 10) / 10),
+    );
+    this._fireDeviceChanged(
+      this.devices.map((d) =>
+        d.entity_id === entityId ? { ...d, setpoint_ramp_deadband: celsius } : d,
       ),
     );
   }

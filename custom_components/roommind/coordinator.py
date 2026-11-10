@@ -21,6 +21,7 @@ from .const import (
     AC_HEATING_BOOST_TARGET,
     CLIMATE_MODE_COOL_ONLY,
     CLIMATE_MODE_HEAT_ONLY,
+    COMPRESSOR_RUN_MIN,
     COMPRESSOR_STATE_SETTLE_SECONDS,
     DEFAULT_COMFORT_COOL,
     DEFAULT_COMFORT_HEAT,
@@ -112,6 +113,26 @@ from .utils.sensor_utils import read_sensor_value
 from .utils.temp_utils import celsius_delta_to_ha, ha_temp_to_celsius, ha_temp_unit_str
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def compressor_is_running(hass: HomeAssistant, device: dict | None) -> bool | None:
+    """Whether an AC compressor is running, from its ENERGY Period (or similar) sensor.
+
+    Below ``COMPRESSOR_RUN_MIN`` the compressor is off. ``None`` if no sensor
+    is configured or the reading is missing.
+    """
+    if not device:
+        return None
+    eid = device.get("compressor_run_sensor") or ""
+    if not eid:
+        return None
+    state = hass.states.get(eid)
+    if state is None or state.state in ("unavailable", "unknown", "", "none"):
+        return None
+    try:
+        return float(state.state) >= COMPRESSOR_RUN_MIN
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_area_name(hass: HomeAssistant, area_id: str) -> str:
@@ -1970,8 +1991,21 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             # Device in an active hvac_mode → need hvac_action to determine firing
             action = state.attributes.get("hvac_action")
             if action is None:
-                # No hvac_action attribute → can't tell if firing → unobservable
-                return (None, 0.0)
+                running = compressor_is_running(self.hass, get_device_by_eid(room.get("devices", []), eid))
+                if running is None:
+                    return (None, 0.0)
+                if running:
+                    if state.state == "cool":
+                        if dominated == "heating":
+                            return (None, 0.0)
+                        dominated = "cooling"
+                    else:
+                        if dominated == "cooling":
+                            return (None, 0.0)
+                        dominated = "heating"
+                elif dominated is None:
+                    dominated = "idle"
+                continue
 
             if action in ("heating", "preheating"):
                 if dominated == "cooling":
@@ -2034,7 +2068,14 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             elif action in ("idle", "off", "heating", "preheating", "cooling", "defrosting"):
                 labels.append(0.0)
             else:
-                labels.append(pf)
+                running = compressor_is_running(self.hass, get_device_by_eid(room.get("devices", []), eid))
+                if running is True:
+                    heating_side = state.state != "cool"
+                    labels.append(1.0 if (mode == MODE_HEATING) == heating_side else 0.0)
+                elif running is False:
+                    labels.append(0.0)
+                else:
+                    labels.append(pf)
         for eid in parked:
             state = self.hass.states.get(eid)
             if state is not None and state.attributes.get("hvac_action") in running_actions:

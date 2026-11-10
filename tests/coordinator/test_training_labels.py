@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from custom_components.roommind.const import MODE_COOLING, MODE_HEATING
+from custom_components.roommind.coordinator import compressor_is_running
 from custom_components.roommind.managers.heat_source_orchestrator import DeviceCommand, HeatSourcePlan
 
 from .conftest import _create_coordinator, _make_store_mock
@@ -127,6 +128,44 @@ def test_valve_label_is_the_opening_the_valve_is_held_at(coordinator):
     }
     direct_valve._valve_sent["climate.trv"] = direct_valve._Held(0.0, 45, 21.0, "number.trv_open", "number.trv_close")
     assert _label(coordinator, room, MODE_HEATING, 0.3, _states(trv=("heat", "heating"))) == 0.45
+
+
+def test_compressor_is_running_threshold():
+    hass = MagicMock()
+    device = {"compressor_run_sensor": "sensor.energy_period"}
+    hass.states.get.return_value = SimpleNamespace(state="1")
+    assert compressor_is_running(hass, device) is True
+    hass.states.get.return_value = SimpleNamespace(state="0.9")
+    assert compressor_is_running(hass, device) is False
+    hass.states.get.return_value = SimpleNamespace(state="unknown")
+    assert compressor_is_running(hass, device) is None
+    assert compressor_is_running(hass, {"compressor_run_sensor": ""}) is None
+    assert compressor_is_running(hass, None) is None
+
+
+def test_compressor_run_sensor_labels_running_and_idle(coordinator):
+    """ENERGY Period ≥ 1 trains as running when the climate entity has no hvac_action."""
+    room = {
+        "devices": [
+            {
+                "entity_id": "climate.ac",
+                "type": "ac",
+                "compressor_run_sensor": "sensor.energy_period",
+            }
+        ]
+    }
+
+    def get(eid, period):
+        if eid == "climate.ac":
+            return SimpleNamespace(state="heat", attributes={})
+        if eid == "sensor.energy_period":
+            return SimpleNamespace(state=period, attributes={})
+        return None
+
+    coordinator.hass.states.get = MagicMock(side_effect=lambda eid: get(eid, "2"))
+    assert coordinator._delivered_training_power(room, MODE_HEATING, 0.5, None) == 1.0
+    coordinator.hass.states.get = MagicMock(side_effect=lambda eid: get(eid, "0.4"))
+    assert coordinator._delivered_training_power(room, MODE_HEATING, 0.5, None) == 0.0
 
 
 def test_heat_only_ac_sitting_out_is_no_driven_device(coordinator):

@@ -88,6 +88,22 @@ def test_ac_heated_room_uses_the_bang_bang_hysteresis(monkeypatch, temp, expecte
     assert mode == expected
 
 
+def test_configured_hysteresis_is_used():
+    ctrl = MPCController(
+        build_hass(),
+        make_room(acs=["climate.ac1"], thermostats=[]),
+        model_manager=RoomModelManager(),
+        outdoor_temp=5.0,
+        settings={"heat_hysteresis": 0.5, "cool_hysteresis": 0.6},
+        has_external_sensor=True,
+    )
+    ctrl._get_can_heat_cool = lambda: (True, True)
+    assert ctrl._evaluate_bangbang(20.6, TargetTemps(heat=21.0, cool=24.0)) == MODE_IDLE
+    assert ctrl._evaluate_bangbang(20.4, TargetTemps(heat=21.0, cool=24.0)) == MODE_HEATING
+    assert ctrl._evaluate_bangbang(24.5, TargetTemps(heat=21.0, cool=24.0)) == MODE_IDLE
+    assert ctrl._evaluate_bangbang(24.7, TargetTemps(heat=21.0, cool=24.0)) == MODE_COOLING
+
+
 def test_running_heat_is_not_stopped_by_the_start_hysteresis(monkeypatch):
     _fake_plan(monkeypatch, MODE_HEATING, pf=0.6)
     ctrl = _controller(previous_mode=MODE_HEATING, mode_on_since=time.time() - 3600)

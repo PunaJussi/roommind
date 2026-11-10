@@ -445,15 +445,24 @@ async def test_single_temperature_in_auto_widens_to_band(setup):
 
 
 @pytest.mark.asyncio
-async def test_set_temperature_with_hvac_mode_switches_mode_first(setup):
+async def test_set_temperature_with_hvac_mode_does_not_enable_control(setup):
+    """HA's set_temperature may pass hvac_mode; that must not turn climate control on."""
     make, _, store, _ = setup
     entity = make(_room(climate_mode="heat_only", climate_control_enabled=False))
     await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22.0, "hvac_mode": HVACMode.HEAT})
-    assert store.async_update_room.await_args_list[0].args[1] == {
-        "climate_control_enabled": True,
-        "climate_mode": "heat_only",
-    }
-    assert store.async_update_room.await_args_list[1].args[1]["override_heat"] == 22.0
+    writes = [c.args[1] for c in store.async_update_room.await_args_list]
+    assert all("climate_control_enabled" not in w for w in writes)
+    assert any(w.get("override_heat") == 22.0 for w in writes)
+
+
+@pytest.mark.asyncio
+async def test_set_temperature_with_hvac_mode_can_switch_mode_without_enabling(setup):
+    make, _, store, _ = setup
+    entity = make(_room(climate_mode="heat_only", climate_control_enabled=False))
+    await entity.async_set_temperature(**{ATTR_TEMPERATURE: 22.0, "hvac_mode": HVACMode.HEAT_COOL})
+    first = store.async_update_room.await_args_list[0].args[1]
+    assert first.get("climate_mode") == "auto"
+    assert "climate_control_enabled" not in first
 
 
 @pytest.mark.asyncio

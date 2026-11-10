@@ -760,6 +760,9 @@ def test_legacy_to_devices_sets_coil_dry_defaults():
     devices = legacy_to_devices([], ["climate.ac"])
     assert devices[0]["setpoint_ramp_minutes"] == 0
     assert devices[0]["setpoint_ramp_step"] == 0.5
+    assert devices[0]["setpoint_ramp_mode"] == "fixed"
+    assert devices[0]["setpoint_ramp_deadband"] == 0.5
+    assert devices[0]["compressor_run_sensor"] == ""
     assert devices[0]["coil_dry"] == "inherit"
     assert devices[0]["coil_dry_minutes"] == 0
     assert devices[0]["coil_dry_mode"] == ""

@@ -20,11 +20,18 @@ from .const import (
     DEFAULT_CONFLICT_RESOLUTION,
     DEFAULT_CONTROL_MODE,
     DOMAIN,
+    HYSTERESIS_MAX,
+    HYSTERESIS_MIN,
     MIN_OCCUPANCY_ECO_DELAY_MINUTES,
     OVERRIDE_CUSTOM,
     OVERRIDE_TYPES,
+    SETPOINT_RAMP_DEADBAND_DEFAULT,
+    SETPOINT_RAMP_DEADBAND_MAX,
+    SETPOINT_RAMP_DEADBAND_MIN,
     SETPOINT_RAMP_MINUTES_MAX,
     SETPOINT_RAMP_MINUTES_MIN,
+    SETPOINT_RAMP_MODE_DEFAULT,
+    SETPOINT_RAMP_MODES,
     SETPOINT_RAMP_STEP_DEFAULT,
     SETPOINT_RAMP_STEP_MAX,
     SETPOINT_RAMP_STEP_MIN,
@@ -78,6 +85,20 @@ def _validate_device_setpoint_ramp(device: dict) -> dict:
     if device.get("type") != "ac":
         device["setpoint_ramp_minutes"] = 0
         device["setpoint_ramp_step"] = SETPOINT_RAMP_STEP_DEFAULT
+        device["setpoint_ramp_mode"] = SETPOINT_RAMP_MODE_DEFAULT
+        device["setpoint_ramp_deadband"] = SETPOINT_RAMP_DEADBAND_DEFAULT
+    return device
+
+
+def _validate_device_compressor_sensor(device: dict) -> dict:
+    """A compressor-run sensor is only for climate devices."""
+    sensor = device.get("compressor_run_sensor") or ""
+    if device.get("type") != "ac":
+        device["compressor_run_sensor"] = ""
+        return device
+    if sensor and not str(sensor).startswith("sensor."):
+        raise vol.Invalid("compressor_run_sensor must be a sensor entity")
+    device["compressor_run_sensor"] = sensor
     return device
 
 
@@ -194,6 +215,9 @@ _SETTINGS_SAVE_FIELDS = (
     "outdoor_heating_max",
     "control_mode",
     "comfort_weight",
+    "heat_hysteresis",
+    "cool_hysteresis",
+    "mpc_start_hysteresis",
     "weather_entity",
     "outdoor_unavailable_notify",
     "climate_control_active",
@@ -435,6 +459,11 @@ async def websocket_list_rooms(
                     vol.Optional("setpoint_ramp_step", default=SETPOINT_RAMP_STEP_DEFAULT): vol.All(
                         vol.Coerce(float), vol.Range(min=SETPOINT_RAMP_STEP_MIN, max=SETPOINT_RAMP_STEP_MAX)
                     ),
+                    vol.Optional("setpoint_ramp_mode", default=SETPOINT_RAMP_MODE_DEFAULT): vol.In(SETPOINT_RAMP_MODES),
+                    vol.Optional("setpoint_ramp_deadband", default=SETPOINT_RAMP_DEADBAND_DEFAULT): vol.All(
+                        vol.Coerce(float), vol.Range(min=SETPOINT_RAMP_DEADBAND_MIN, max=SETPOINT_RAMP_DEADBAND_MAX)
+                    ),
+                    vol.Optional("compressor_run_sensor", default=""): str,
                     vol.Optional("coil_dry", default=COIL_DRY_INHERIT): vol.In(COIL_DRY_OVERRIDES),
                     vol.Optional("coil_dry_minutes", default=0): vol.All(vol.Coerce(int), vol.Range(min=0, max=60)),
                     vol.Optional("coil_dry_mode", default=""): vol.In(["", *COIL_DRY_MODES]),
@@ -445,6 +474,7 @@ async def websocket_list_rooms(
                     vol.Optional("valve_closing_mode"): vol.In(VALVE_CLOSING_MODES),
                 },
                 _validate_device_setpoint_ramp,
+                _validate_device_compressor_sensor,
                 _validate_device_idle_action,
                 _validate_device_coil_dry,
                 _validate_device_valve,
@@ -788,6 +818,15 @@ async def websocket_get_settings(
         vol.Optional("outdoor_heating_max"): vol.Coerce(float),
         vol.Optional("control_mode"): vol.In([CONTROL_MODE_MPC, CONTROL_MODE_BANGBANG]),
         vol.Optional("comfort_weight"): vol.Coerce(float),
+        vol.Optional("heat_hysteresis"): vol.All(
+            vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)
+        ),
+        vol.Optional("cool_hysteresis"): vol.All(
+            vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)
+        ),
+        vol.Optional("mpc_start_hysteresis"): vol.All(
+            vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)
+        ),
         vol.Optional("weather_entity"): str,
         vol.Optional("outdoor_unavailable_notify"): bool,
         vol.Optional("climate_control_active"): bool,

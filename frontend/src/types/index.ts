@@ -90,6 +90,9 @@ export interface DeviceConfig {
   setpoint_offset?: number; // °C added to the room target in direct mode, default 0
   setpoint_ramp_minutes?: number; // 0 = off, otherwise minutes between AC setpoint steps
   setpoint_ramp_step?: number; // max °C moved toward the proportional setpoint per step
+  setpoint_ramp_mode?: "fixed" | "delta"; // default "fixed"
+  setpoint_ramp_deadband?: number; // °C; delta mode: no change while |error| is within this
+  compressor_run_sensor?: string; // ENERGY Period (or similar): below 1 = compressor off
   coil_dry?: "inherit" | "on" | "off"; // default "inherit"
   coil_dry_minutes?: number; // 0 = inherit global
   coil_dry_mode?: "" | "fan_only" | "dry"; // "" = inherit global
@@ -185,6 +188,9 @@ export interface GlobalSettings {
   outdoor_heating_max?: number;
   control_mode?: "mpc" | "bangbang";
   comfort_weight?: number;
+  heat_hysteresis?: number;
+  cool_hysteresis?: number;
+  mpc_start_hysteresis?: number;
   weather_entity?: string;
   outdoor_unavailable_notify?: boolean;
   climate_control_active?: boolean;

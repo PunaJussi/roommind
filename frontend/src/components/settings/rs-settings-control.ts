@@ -7,7 +7,16 @@ import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant } from "../../types";
 import { localize } from "../../utils/localize";
 import { getSelectValue } from "../../utils/events";
-import { toDisplay, toCelsius, tempUnit, tempStep, tempRange } from "../../utils/temperature";
+import {
+  toDisplay,
+  toCelsius,
+  toDisplayDelta,
+  toCelsiusDelta,
+  tempUnit,
+  tempStep,
+  tempRange,
+  usesFahrenheit,
+} from "../../utils/temperature";
 import { preheatLeadHours } from "../../utils/constants";
 
 const CONTROL_DOCS_URL =
@@ -18,6 +27,9 @@ export class RsSettingsControl extends RsSettingsBase {
   @property({ attribute: false }) public hass!: HomeAssistant;
   @property({ type: String }) public controlMode: "mpc" | "bangbang" = "mpc";
   @property({ type: Number }) public comfortWeight = 70;
+  @property({ type: Number }) public heatHysteresis = 0.2;
+  @property({ type: Number }) public coolHysteresis = 0.2;
+  @property({ type: Number }) public mpcStartHysteresis = 0.1;
   @property({ type: Number }) public outdoorCoolingMin = 16;
   @property({ type: Number }) public outdoorHeatingMax = 22;
   @property({ type: Boolean }) public predictionEnabled = true;
@@ -70,6 +82,64 @@ export class RsSettingsControl extends RsSettingsBase {
         <a class="helper-link" href=${CONTROL_DOCS_URL} target="_blank" rel="noreferrer">
           ${localize("common.learn_more", l)}
         </a>
+      </div>
+
+      <div class="settings-section">
+        <label class="section-label">${localize("settings.hysteresis_title", l)}</label>
+        <p class="hint">${localize("settings.hysteresis_hint", l)}</p>
+        <div class="threshold-grid">
+          <div class="threshold-field">
+            <ha-textfield
+              .value=${String(toDisplayDelta(this.heatHysteresis, this.hass))}
+              .label=${localize("settings.heat_hysteresis", l)}
+              .suffix=${tempUnit(this.hass)}
+              type="number"
+              step=${usesFahrenheit(this.hass) ? "0.2" : "0.1"}
+              min=${String(toDisplayDelta(0.1, this.hass))}
+              max=${String(toDisplayDelta(2, this.hass))}
+              @change=${(e: Event) => {
+                const v = parseFloat((e.target as HTMLInputElement).value);
+                if (!isNaN(v))
+                  this._fire("heatHysteresis", Math.round(toCelsiusDelta(v, this.hass) * 10) / 10);
+              }}
+            ></ha-textfield>
+            <span class="field-hint">${localize("settings.heat_hysteresis_hint", l)}</span>
+          </div>
+          <div class="threshold-field">
+            <ha-textfield
+              .value=${String(toDisplayDelta(this.coolHysteresis, this.hass))}
+              .label=${localize("settings.cool_hysteresis", l)}
+              .suffix=${tempUnit(this.hass)}
+              type="number"
+              step=${usesFahrenheit(this.hass) ? "0.2" : "0.1"}
+              min=${String(toDisplayDelta(0.1, this.hass))}
+              max=${String(toDisplayDelta(2, this.hass))}
+              @change=${(e: Event) => {
+                const v = parseFloat((e.target as HTMLInputElement).value);
+                if (!isNaN(v))
+                  this._fire("coolHysteresis", Math.round(toCelsiusDelta(v, this.hass) * 10) / 10);
+              }}
+            ></ha-textfield>
+            <span class="field-hint">${localize("settings.cool_hysteresis_hint", l)}</span>
+          </div>
+          <div class="threshold-field">
+            <ha-textfield
+              .value=${String(toDisplayDelta(this.mpcStartHysteresis, this.hass))}
+              .label=${localize("settings.mpc_start_hysteresis", l)}
+              .suffix=${tempUnit(this.hass)}
+              type="number"
+              step=${usesFahrenheit(this.hass) ? "0.2" : "0.1"}
+              min=${String(toDisplayDelta(0.1, this.hass))}
+              max=${String(toDisplayDelta(2, this.hass))}
+              @change=${(e: Event) => {
+                const v = parseFloat((e.target as HTMLInputElement).value);
+                if (!isNaN(v))
+                  this._fire("mpcStartHysteresis", Math.round(toCelsiusDelta(v, this.hass) * 10) / 10);
+              }}
+            ></ha-textfield>
+            <span class="field-hint">${localize("settings.mpc_start_hysteresis_hint", l)}</span>
+          </div>
+        </div>
       </div>
 
       <div class="settings-section">

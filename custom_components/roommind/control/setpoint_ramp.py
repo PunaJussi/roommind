@@ -8,14 +8,17 @@ at most one step per interval, until the room sensor is at the target.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..const import (
     MODE_COOLING,
     MODE_HEATING,
     MODE_IDLE,
+    SETPOINT_RAMP_DEADBAND_DEFAULT,
     SETPOINT_RAMP_MINUTES_MAX,
     SETPOINT_RAMP_MINUTES_MIN,
+    SETPOINT_RAMP_MODE_DEFAULT,
+    SETPOINT_RAMP_MODES,
     SETPOINT_RAMP_STEP_DEFAULT,
     SETPOINT_RAMP_STEP_MAX,
     SETPOINT_RAMP_STEP_MIN,
@@ -25,8 +28,28 @@ from ..utils.device_utils import DEVICE_TYPE_AC, SETPOINT_MODE_DIRECT
 _MODES = frozenset({MODE_HEATING, MODE_COOLING})
 
 
-def ramp_config(device: dict | None) -> tuple[int, float] | None:
-    """Return ``(interval_minutes, step_celsius)`` for a ramped AC, else None.
+class RampConfig(NamedTuple):
+    """Interval, fixed-step size, mode, and delta deadband for a ramped AC."""
+
+    minutes: int
+    step: float
+    mode: str = SETPOINT_RAMP_MODE_DEFAULT
+    deadband: float = SETPOINT_RAMP_DEADBAND_DEFAULT
+
+
+def _clamp_delta(raw: Any, default: float) -> float:
+    """Clamp a °C delta to the gradual-thermostat step range."""
+    try:
+        value = float(default if raw in (None, "") else raw)
+    except (TypeError, ValueError):
+        value = default
+    if value != value:  # NaN
+        value = default
+    return min(SETPOINT_RAMP_STEP_MAX, max(SETPOINT_RAMP_STEP_MIN, value))
+
+
+def ramp_config(device: dict | None) -> RampConfig | None:
+    """Return ramp settings for a ramped AC, else None.
 
     Only a proportional climate device with a positive interval is ramped.
     A TRV keeps its immediate boost, and a direct device keeps the room target.
@@ -42,15 +65,12 @@ def ramp_config(device: dict | None) -> tuple[int, float] | None:
     if minutes <= 0:
         return None
     minutes = min(SETPOINT_RAMP_MINUTES_MAX, max(SETPOINT_RAMP_MINUTES_MIN, minutes))
-    raw_step = device.get("setpoint_ramp_step")
-    try:
-        step = float(SETPOINT_RAMP_STEP_DEFAULT if raw_step in (None, "") else raw_step)
-    except (TypeError, ValueError):
-        step = SETPOINT_RAMP_STEP_DEFAULT
-    if step != step:  # NaN
-        step = SETPOINT_RAMP_STEP_DEFAULT
-    step = min(SETPOINT_RAMP_STEP_MAX, max(SETPOINT_RAMP_STEP_MIN, step))
-    return minutes, step
+    step = _clamp_delta(device.get("setpoint_ramp_step"), SETPOINT_RAMP_STEP_DEFAULT)
+    mode = device.get("setpoint_ramp_mode") or SETPOINT_RAMP_MODE_DEFAULT
+    if mode not in SETPOINT_RAMP_MODES:
+        mode = SETPOINT_RAMP_MODE_DEFAULT
+    deadband = _clamp_delta(device.get("setpoint_ramp_deadband"), SETPOINT_RAMP_DEADBAND_DEFAULT)
+    return RampConfig(minutes, step, mode, deadband)
 
 
 def ramped_display_eid(

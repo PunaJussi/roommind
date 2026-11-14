@@ -8,7 +8,7 @@ alwaysApply: true
 - GitHub: https://github.com/PunaJussi/roommind (julkinen forkki, parent `snazzybean/roommind`)
 - `origin` = PunaJussi/roommind. `upstream` = snazzybean/roommind.
 - Älä pushaa `upstreamiin`. Älä paina Cursorsin **Publish Branch** (menisi snazzybeanille).
-- Versio HA:ssa: **1.8.2.10**. Virallinen on v1.8.2; neljäs numero erottaa HACS-päivityksen.
+- Versio HA:ssa: **1.8.2.11**. Virallinen on v1.8.2; neljäs numero erottaa HACS-päivityksen.
 - Kieli käyttäjälle: suomi.
 
 ## Älä ylikirjoita

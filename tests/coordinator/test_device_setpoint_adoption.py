@@ -91,6 +91,45 @@ async def test_off_by_default(hass, mock_config_entry):
 
 
 @pytest.mark.asyncio
+async def test_gradual_ac_dial_replaces_held_setpoint_without_room_override(hass, mock_config_entry):
+    """A manual AC setpoint becomes the Gradual held value; room target stays."""
+    from custom_components.roommind.const import MODE_HEATING
+
+    room = {
+        **SAMPLE_ROOM,
+        "follow_device_setpoint": False,
+        "thermostats": [],
+        "acs": [AC],
+        "devices": [
+            {
+                "entity_id": AC,
+                "type": "ac",
+                "role": "auto",
+                "setpoint_mode": "proportional",
+                "setpoint_ramp_minutes": 60,
+                "setpoint_ramp_step": 0.5,
+            }
+        ],
+    }
+    coordinator, store, clock = _setup(hass, mock_config_entry, room)
+    coordinator._setpoint_ramp.note(AC, 22.0, MODE_HEATING, clock.t)
+    _devices(hass, **{AC: ("heat", {"temperature": 22.0, "target_temp_step": 0.5, "hvac_modes": ["heat", "off"]})})
+    await _cycle(coordinator, clock)
+
+    _devices(hass, **{AC: ("heat", {"temperature": 24.0, "target_temp_step": 0.5, "hvac_modes": ["heat", "off"]})})
+    live = await _cycle(coordinator, clock)
+
+    store.async_update_room.assert_not_awaited()
+    assert live["override_active"] is False
+    assert coordinator._setpoint_ramp.setpoint(AC) == 24.0
+    # Interval clock reset: a step within 60 min must still hold 24
+    held = coordinator._setpoint_ramp.advance(
+        AC, MODE_HEATING, clock.t + 100, minutes=60, step=0.5, direction=1, seed=24.0, desired=27.0
+    )
+    assert held == 24.0
+
+
+@pytest.mark.asyncio
 async def test_switching_it_on_later_does_not_adopt_an_old_change(hass, mock_config_entry):
     coordinator, store, clock = _setup(hass, mock_config_entry, SAMPLE_ROOM)
     _devices(hass, **{TRV: ("heat", {"temperature": 26.0})})

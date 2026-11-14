@@ -5,13 +5,18 @@ Tämä repositorio on julkinen forkki virallisesta RoomMindistä (`snazzybean/ro
 | | |
 |---|---|
 | Forkki | https://github.com/PunaJussi/roommind |
-| Asennettu versio | 1.8.2.10 |
+| Asennettu versio | 1.8.2.11 |
 | Virallinen pohja | v1.8.2 |
 | HA-kohde | `/homeassistant/custom_components/roommind` |
 
+## 1.8.2.11
+
+- Manuaalinen ILP-setpoint korvaa Gradualin held-arvon (huoneen tavoite ennallaan); intervalli nollautuu.
+- Coordinator `UPDATE_INTERVAL` 30 → **120** s.
+
 ## 1.8.2.10
 
-- **Never idle / Keep heat when outdoor is cold** pitävät vain `heat`/`cool`-moodin — eivät kirjoita setpointeja. Gradual thermostat omistaa lämpötilan (korjaa ~30 s A↔B-pingiksen idle-jaksoissa).
+- **Never idle / Keep heat when outdoor is cold** pitävät vain `heat`/`cool`-moodin — eivät kirjoita setpointeja. Gradual thermostat omistaa lämpötilan (korjaa A↔B-pingiksen idle-jaksoissa).
 - Fan speed: Default / Room Occupied / Override (entity-OR); coil dry voittaa kuivauksen ajan.
 - Gradual offset-max 5 °C; UI vain englanniksi.
 

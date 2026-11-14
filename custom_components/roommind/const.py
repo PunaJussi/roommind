@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.8.2.10"
+VERSION = "1.8.2.11"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -123,33 +123,33 @@ VALVE_OVERSHOOT_STOP_K = 0.5  # A modulating valve closes this far above the tar
 VALVE_PROPORTIONAL_BAND_K = 1.0  # A modulating valve opens 100 % further per this many K below the target
 # AC sensor offset (device reading - room sensor while the compressor runs), see HeadOffsetTracker
 HEAD_OFFSET_SETTLE_S = 240  # Running time before readings count: the offset builds up with the airflow after a start
-HEAD_OFFSET_ALPHA = 0.05  # EMA weight per reading (one per 30 s cycle: ~10 min of running to follow a change)
+HEAD_OFFSET_ALPHA = 0.05  # EMA weight per reading (one per UPDATE_INTERVAL cycle)
 HEAD_OFFSET_MIN_SAMPLES = 10  # Readings before the offset is applied to setpoints
 HEAD_OFFSET_MAX_K = 4.0  # Larger differences are a misplaced or broken sensor, not a bias to correct
 HEAD_OFFSET_GRID_K = 0.5  # Applied offsets are multiples of this; below a quarter of a degree nothing changes
 HEAD_OFFSET_HYSTERESIS_K = 0.375  # The applied offset moves only once the learned one is this far from it
 # Comfort-weighted cost (°C² equivalent) of starting a run, for slow heating systems (UFH) only.
 # Fast systems get a start hysteresis in the controller; UFH keeps the optimizer's decisions
-# and toggled heat/idle every 30 s cycle at the target without it (#429).
+# and toggled heat/idle every coordinator cycle at the target without it (#429).
 SLOW_SYSTEM_START_PENALTY = 1.0
 
-# Update interval in seconds
-UPDATE_INTERVAL = 30
+# Update interval in seconds (coordinator control loop)
+UPDATE_INTERVAL = 120
 
 # Sensor dropout: keep using cached temperature for this many seconds
-# before falling back to idle (~10 coordinator cycles at 30s).
+# before falling back to idle (~3 coordinator cycles at 120s).
 MAX_SENSOR_STALENESS = 300
 
 # Coordinator throttle intervals (in cycles of UPDATE_INTERVAL)
-HISTORY_WRITE_CYCLES = 6  # ~3 min at 30s cycle
-THERMAL_SAVE_CYCLES = 30  # ~15 min
-HISTORY_ROTATE_CYCLES = 360  # ~3 hours
+HISTORY_WRITE_CYCLES = 6  # ~12 min at 120s cycle
+THERMAL_SAVE_CYCLES = 30  # ~60 min
+HISTORY_ROTATE_CYCLES = 360  # ~12 hours
 
 # EKF update: accumulate observations before updating (better signal-to-noise)
-EKF_UPDATE_MIN_DT = 3.0  # minutes — matches HISTORY_WRITE_CYCLES
+EKF_UPDATE_MIN_DT = 3.0  # minutes — wall-clock target; cycles stretch with UPDATE_INTERVAL
 
 # Outdoor sensor watchdog: notify when no valid outdoor temperature for this
-# many coordinator cycles (60 × 30 s = 30 min).
+# many coordinator cycles (60 × 120 s = 120 min).
 OUTDOOR_UNAVAILABLE_NOTIFY_CYCLES = 60
 OUTDOOR_UNAVAILABLE_NOTIFICATION_ID = "roommind_outdoor_unavailable"
 

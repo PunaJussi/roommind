@@ -733,18 +733,27 @@ class RoomMindCoordinator(DataUpdateCoordinator):
             return room
         return {**room, "override_heat": None, "override_cool": None, "override_until": None, "override_type": None}
 
-    async def _async_adopt_device_setpoints(self, room: dict, settings: dict) -> dict:
-        """Take a setpoint changed on a device over as the room target until the schedule changes next (#259).
+    def _ramp_mode_for_device(self, eid: str, state: Any) -> str:
+        """Heating/cooling intent for a Gradual note from the device's HVAC state."""
+        if state is not None and state.state == "cool":
+            return MODE_COOLING
+        if state is not None and state.state in ("heat", "heat_cool", "auto"):
+            return MODE_HEATING
+        return self._setpoint_ramp.mode(eid) or MODE_HEATING
 
-        The value set on the device becomes the target, as with the room climate
-        entity; a direct setpoint offset comes off again. Every device is observed,
-        so its last setpoint is current when the room opts in. Returns the room
-        with the override applied.
+    async def _async_adopt_device_setpoints(self, room: dict, settings: dict) -> dict:
+        """Observe device setpoints: seed Gradual held values, optionally take over as room target (#259).
+
+        Every device is observed so its last setpoint stays current. A change on a
+        Gradual AC replaces the ramp held value (as if RoomMind had set it) and
+        resets the adjustment interval. With ``follow_device_setpoint`` the value
+        also becomes the room target until the schedule changes next.
         """
         area_id = room.get("area_id", "unknown")
         climate_mode = room.get("climate_mode", "auto")
         devices = room.get("devices", [])
         full_control = bool(room.get("temperature_sensor"))
+        climate_on = settings.get("climate_control_active", True) and room.get("climate_control_enabled", True)
         # side -> (size of the change, new target °C); the biggest change wins
         chosen: dict[str, tuple[float, float]] = {}
         changed_on: list[str] = []
@@ -758,17 +767,28 @@ class RoomMindCoordinator(DataUpdateCoordinator):
                 eid, state.state, state.attributes, *self._setpoint_tolerances(state)
             )
             offset = get_setpoint_offset(devices, eid) if full_control else 0.0
-            for attr, (before, after) in changes.items():
+            ramped = ramp_config(device) is not None
+            for attr, (_before, after) in changes.items():
+                if climate_on and ramped and attr == "temperature":
+                    after_c = ha_temp_to_celsius(self.hass, after)
+                    ramp_mode = self._ramp_mode_for_device(eid, state)
+                    self._setpoint_ramp.note(eid, after_c, ramp_mode, time.time())
+                    _LOGGER.info(
+                        "Room '%s': gradual held setpoint on '%s' adopted from device (%.1f °C)",
+                        area_id,
+                        eid,
+                        after_c,
+                    )
                 side = _setpoint_side(attr, state, device.get("type", ""), climate_mode)
                 if side is None:
                     continue
-                size = abs(after - before)
+                size = abs(after - _before)
                 if size > chosen.get(side, (0.0, 0.0))[0]:
                     chosen[side] = (size, ha_temp_to_celsius(self.hass, after) - offset)
                 changed_on.append(eid)
         if not changed_on or not room.get("follow_device_setpoint", False):
             return room
-        if not (settings.get("climate_control_active", True) and room.get("climate_control_enabled", True)):
+        if not climate_on:
             return room
         live = ((self.data or {}).get("rooms") or {}).get(area_id) or {}
         heat, cool = (chosen[side][1] if side in chosen else None for side in ("heat", "cool"))

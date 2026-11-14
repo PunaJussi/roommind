@@ -175,7 +175,11 @@ class SetpointRamp:
         return sent
 
     def note(self, entity_id: str, setpoint: float, mode: str, now: float) -> None:
-        """Remember a setpoint sent by another path (a hold that eased the unit off)."""
+        """Remember a setpoint as the held value (RoomMind send, idle ease, or user dial).
+
+        Resets the adjustment-interval clock so the next step waits a full interval
+        from *now*, continuing from this value rather than an older held one.
+        """
         if mode not in _MODES:
             return
         self._store(entity_id, round(setpoint, 1), now, mode)

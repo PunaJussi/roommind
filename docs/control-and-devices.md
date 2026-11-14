@@ -46,7 +46,11 @@ This matters for the options below.
 
 ## Changes Made on the Device
 
-RoomMind writes its setpoint to every device it controls and sets it again when the device reports something else, so a turn of the TRV dial is undone with RoomMind's next command (usually within 30 seconds; a TRV that RoomMind switched off keeps the value until its next run). With `Take over changes made on the device` (schedule settings of the room, off by default) such a change becomes the room target instead, until the next change of the active schedule, like a temperature set on the room climate entity. Without a schedule it holds until you end the override. A running override, also one with a duration, is replaced and then holds until the next schedule change as well.
+RoomMind writes its setpoint to every device it controls and sets it again when the device reports something else, so a turn of the TRV dial is undone with RoomMind's next command (usually within one coordinator cycle; a TRV that RoomMind switched off keeps the value until its next run).
+
+**Gradual thermostat (AC):** a setpoint changed on the unit (remote / MelCloud / HA climate card) replaces RoomMind's held Gradual value entirely — as if RoomMind had set it — and resets the adjustment interval. The room target does **not** change. The next Gradual step continues from that value.
+
+With `Take over changes made on the device` (schedule settings of the room, off by default) such a change becomes the room target instead, until the next change of the active schedule, like a temperature set on the room climate entity. Without a schedule it holds until you end the override. A running override, also one with a duration, is replaced and then holds until the next schedule change as well.
 
 - The value set on the device is the new target, also in `Full Control`, where the device showed RoomMind's boost or idle setpoint before (e.g. 29.5 °C while heating, or 5 °C while idle). A direct setpoint offset is taken off again. Afterwards the device shows RoomMind's setpoint for the new target, not the value turned in.
 - ACs count too: a TRV and an AC in heating mode change the heating side, an AC in cooling or dry mode the cooling side, a range change on a `heat_cool` device both sides.
@@ -122,7 +126,7 @@ The fields are on the device, in the room's device editor, for a climate device 
 
 When the room is colder than the target, RoomMind puts the unit in `heat` and raises the setpoint already on the unit. Fixed step always moves one maximum step. Delta step moves by the room's distance from the target (capped at 5 °C), so a larger gap means a larger change. When the room is warmer, it lowers the setpoint. Cooling uses the cooling target the same way. The setpoint may sit at most 5 °C above or below the room target (enough for a cold outdoor gap, not a run-away 28–30 °C). Inside the deadband (Fixed: the same as the step; Delta: the Deadband field) — and while idle — the setpoint steps back toward the room target, so a high trim does not stick. There is no separate outdoor curve.
 
-When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. `Never idle` and **Keep heat when outdoor is cold** leave the unit in `heat` (or `cool`) only — they do not rewrite the setpoint. Gradual eases the setpoint toward the room target on its interval. A later heating run continues from that eased value, not from the boosted max.
+When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. `Never idle` and **Keep heat when outdoor is cold** leave the unit in `heat` (or `cool`) only — they do not rewrite the setpoint. Gradual eases the setpoint toward the room target on its interval. A later heating run continues from that eased value, not from the boosted max. A manual change on the unit replaces the held Gradual value (see [Changes Made on the Device](#changes-made-on-the-device)).
 
 `Compressor run sensor` (optional): a sensor such as ENERGY Period, used when the climate entity does not report `hvac_action`. A value below 1 means the compressor is off. RoomMind uses this to train Intelligent control. It does not keep heating on at the target.
 

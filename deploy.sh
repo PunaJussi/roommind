@@ -51,7 +51,8 @@ tar czf - -C "${SCRIPT_DIR}/custom_components/roommind" . | \
 echo "    OK"
 
 echo ""
-echo "==> Done! Next steps:"
-echo "    - Python changes:        Settings → Integrations → RoomMind → ⋮ → Reload"
-echo "    - Frontend changes:      Hard-refresh browser (Cmd+Shift+R / Ctrl+Shift+R)"
-echo "    - WS schema / manifest:  Full HA restart (Settings → System → Restart)"
+echo "==> Done! Next steps (PunaJussi fork — see docs/fork.md):"
+echo "    - REQUIRED:              Full HA Core restart (Settings → System → Restart)"
+echo "                             RoomMind reload alone often leaves old Python in memory."
+echo "    - Verify running version: diagnostics integration_manifest.version"
+echo "    - Frontend:              Hard-refresh browser after restart"

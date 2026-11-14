@@ -14,6 +14,7 @@ Tämä repositorio on julkinen forkki virallisesta RoomMindistä (`snazzybean/ro
 - Manuaalinen ILP-setpoint (kaukosäädin / MelCloud / HA) korvaa Gradualin held-arvon kuin RoomMind olisi asettanut sen; adjustment-intervalli nollautuu. Huoneen tavoite ei muutu (`follow_device_setpoint` edelleen erillinen optio).
 - Coordinator `UPDATE_INTERVAL` 30 → **120** s (ohjaussilmukan tarkistusväli; Gradual-askel edelleen laitteen Adjustment interval).
 - Käyttäjädok: [control-and-devices.md](control-and-devices.md) — *Changes Made on the Device* / *Gradual thermostat*.
+- **VAADI Core restart deployn jälkeen** — ks. [Deploy → Oppitunti](#oppitunti-2026-11-14).
 
 ## 1.8.2.10
 
@@ -30,11 +31,42 @@ Home Assistantin omat päivitykset (Core, OS, Supervisor) saa asentaa normaalist
 
 ## Kun virallisesta RoomMindistä tulee uusi versio
 
-Kerro Cursor-agentille. Se hakee muutokset `upstreamista`, säilyttää Gradual thermostat -koodin, nostaa fork-version (esim. 1.8.3 → 1.8.3.1) ja siirtää tiedostot Home Assistantiin SSH:lla.
+Kerro Cursor-agentille. Se hakee muutokset `upstreamista`, säilyttää Gradual thermostat -koodin, nostaa fork-version (esim. 1.8.3 → 1.8.3.1) ja siirtää tiedostot Home Assistantiin (alla).
 
 Gradual thermostat -käyttöohje: [control-and-devices.md](control-and-devices.md).
 
 Forkissa UI on vain englanniksi (`frontend/src/locales/en.json`). Älä palauta `de`/`fr`/`it`-käännöksiä upstream-mergessä.
+
+## Deploy HA:han (Windows)
+
+| | |
+|---|---|
+| Kohde | `/homeassistant/custom_components/roommind` |
+| Tunnukset | Cursor personal agent store: `ha-credentials.md` (älä commitoi) |
+| Pikakomennot | PuTTY **plink** + `-pw` (salasana storesta) |
+| Tiedostojen siirto | **paramiko** + tar stdin (ei SFTP:tä) |
+| Älä | pelkkä OpenSSH `ssh` / `BatchMode=yes` ilman avainta → `Permission denied (publickey,password)` |
+
+### Pakollinen järjestys
+
+1. Siirrä tiedostot (paramiko + tar → yllä oleva kohde).
+2. Tarkista **levy**: `manifest.json` → odotettu versio (esim. `1.8.2.11`).
+3. **Käynnistä Home Assistant Core uudelleen** (Settings → System → Restart, tai MCP `ha_restart`).  
+   Pelkkä *Integrations → RoomMind → Reload* **ei riitä** Python-muutoksiin: vanhat moduulit voivat jäädä muistiin. RoomMind näyttää tällöin korjauksen `restart_required` (levy ≠ ajossa oleva `VERSION`).
+4. Tarkista **ajo**: diagnostiikan `integration_manifest.version` (tai vastaava) = odotettu. Vasta sitten “versio on HA:ssa”.
+5. Frontend-muutokset: hard-refresh selaimessa reload/restartin jälkeen.
+
+Älä commitoi `_deploy_ha.py` / `roommind.zip`. Sama checklist: `.cursor/rules/fork-ops.mdc`.
+
+### Oppitunti (2026-11-14)
+
+1.8.2.11 deploattiin ja RoomMind reloadattiin; agentti ilmoitti version olevan HA:ssa. ILP-dial palautui silti. Syyt:
+
+- Reload ei ladannut uutta coordinator-logiikkaa (`SetpointRamp.note` dialille).
+- “On HA:ssa” perustui SSH-tiedostoon + reloadiin, ei ajossa olevan version tarkistukseen.
+- Diagnostiikka / käyttäytyminen vastasi vanhaa buildia kunnes tehtiin **Core restart**.
+
+Jatkossa: deploy ilman vahvistettua ajoversion tarkistusta = deploy kesken.
 
 ## Compressor run sensor (Tehomittari)
 

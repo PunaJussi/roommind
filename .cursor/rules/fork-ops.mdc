@@ -23,8 +23,27 @@ alwaysApply: true
 2. Säilytä `SetpointRamp` / Gradual thermostat; älä pudota DeviceSetpointTrackeria.
 3. Nosta versio (`const.py` VERSION + `manifest.json`), esim. 1.8.3 → **1.8.3.1**.
 4. Testit + `frontend` build (`roommind-panel.js` cache-bust `?v={VERSION}`).
-5. Push `origin`, GitHub Release + zip. Deploy HA:han SSH:lla (SFTP pois; tar stdin; kohde `/homeassistant/custom_components/roommind`). Älä commitoi `_deploy_ha.py` / `roommind.zip`.
+5. Push `origin`, GitHub Release + zip. Deploy HA:han (alla). Älä commitoi `_deploy_ha.py` / `roommind.zip`.
 6. HA-core/OS-päivitykset saa asentaa normaalisti.
+
+## Deploy HA:han (pakollinen checklist)
+
+Kohde: `/homeassistant/custom_components/roommind`. Yksityiskohdat: `docs/fork.md`.
+
+1. **paramiko** + tar stdin (ei SFTP; ei pelkkää OpenSSH `BatchMode` ilman avainta).
+2. Vahvista levyllä: `manifest.json` version = odotettu (esim. `1.8.2.11`).
+3. **Täysi Home Assistant Core -restart** (`ha_restart`). Pelkkä RoomMind **reload ei riitä** — Python-moduulit voivat jäädä vanhaan versioon; RoomMindin `restart_required`-korjaus tarkoittaa juuri tätä.
+4. Käynnistyksen jälkeen vahvista **ajossa** oleva versio diagnostiikasta / `integration_manifest.version` (ei vain SSH-tiedostoa). Älä väitä “on HA:ssa” ennen tätä.
+5. Jos dial/Gradual-käyttäytyminen ei muutu deployn jälkeen: ensin versio ajossa, vasta sitten koodibugijahti.
+
+**Opittu (2026-11-14):** 1.8.2.11 tar + reload → levyllä uusi, ajossa vanha → ILP-dial palautui edelleen. Korjaus: uudelleen deploy + Core restart + version tarkistus.
+
+## HA SSH (Windows)
+
+- Tunnukset: personal store  
+  `C:\Users\jussi\AppData\Local\Cursor\AgentStores\cursor_agent_stores\u200339555\files\ha-credentials.md`  
+  (host `192.168.1.12`, user `punajussi`).
+- **Älä** aja pelkkää OpenSSH:ta (`ssh …` / `BatchMode=yes`) — ei avainta → `Permission denied`. Pikakomennot: **plink `-pw`**. Deploy: **paramiko**.
 
 ## Ominaisuus
 

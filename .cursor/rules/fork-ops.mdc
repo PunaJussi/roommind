@@ -28,7 +28,7 @@ alwaysApply: true
 
 ## Ominaisuus
 
-Gradual thermostat: `custom_components/roommind/control/setpoint_ramp.py`. Käyttäjädok: `docs/control-and-devices.md` (kohta Gradual thermostat).
+Gradual thermostat: `custom_components/roommind/control/setpoint_ramp.py`. Käyttäjädok: `docs/control-and-devices.md` (Gradual thermostat + Changes Made on the Device). Manuaalinen ILP-säätö → `SetpointRamp.note` (huone-target ennallaan). `UPDATE_INTERVAL` = 120 s.
 
 ## HA-asennus: compressor run
 

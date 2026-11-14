@@ -46,20 +46,26 @@ This matters for the options below.
 
 ## Changes Made on the Device
 
-RoomMind writes its setpoint to every device it controls and sets it again when the device reports something else, so a turn of the TRV dial is undone with RoomMind's next command (usually within one coordinator cycle; a TRV that RoomMind switched off keeps the value until its next run).
+RoomMind writes its setpoint to every device it controls and sets it again when the device reports something else (checked each coordinator cycle, currently 120 seconds). How a hand change is treated depends on the device:
 
-**Gradual thermostat (AC):** a setpoint changed on the unit (remote / MelCloud / HA climate card) replaces RoomMind's held Gradual value entirely — as if RoomMind had set it — and resets the adjustment interval. The room target does **not** change. The next Gradual step continues from that value.
+### Gradual thermostat (AC)
 
-With `Take over changes made on the device` (schedule settings of the room, off by default) such a change becomes the room target instead, until the next change of the active schedule, like a temperature set on the room climate entity. Without a schedule it holds until you end the override. A running override, also one with a duration, is replaced and then holds until the next schedule change as well.
+A setpoint changed on the unit (remote, MelCloud, or the HA climate card) **replaces RoomMind's held Gradual value entirely** — as if RoomMind had set it — and **resets the adjustment interval**. The room target (schedule / Makuuhuone climate) does **not** change. The next Gradual step continues from the value you set, not from RoomMind's previous held number.
 
-- The value set on the device is the new target, also in `Full Control`, where the device showed RoomMind's boost or idle setpoint before (e.g. 29.5 °C while heating, or 5 °C while idle). A direct setpoint offset is taken off again. Afterwards the device shows RoomMind's setpoint for the new target, not the value turned in.
+Example: room target 22 °C, Gradual held 22 °C, you set the heat pump to 24 °C → held becomes 24 °C; about 60 minutes later Gradual may step from 24 toward the heating/cooling trim, not from 22.
+
+### Take over changes made on the device (optional)
+
+With this schedule setting on (off by default), a change on the dial/remote becomes the **room target** until the next schedule change, like a temperature set on the room climate entity. Without a schedule it holds until you end the override. A running override is replaced the same way.
+
+- The value set on the device is the new room target, also in `Full Control`, where the device showed RoomMind's boost or idle setpoint before (e.g. 29.5 °C while heating). A direct setpoint offset is taken off again. Afterwards the device shows RoomMind's setpoint for the new target.
 - ACs count too: a TRV and an AC in heating mode change the heating side, an AC in cooling or dry mode the cooling side, a range change on a `heat_cool` device both sides.
 - Only devices that report their setpoint to Home Assistant can be followed. IR devices without state feedback cannot.
-- Thermostats always change the heating side. An AC with a single setpoint in `heat_cool`/`auto` changes the side it reports heating or cooling for; when it reports neither, or is off or in fan mode, it counts only in heat-only or cool-only rooms (for the side the room uses). A change on a side the room does not use (e.g. a thermostat in a cool-only room) is ignored.
-- RoomMind cannot see who changed a setpoint. A value it sent itself and the device has not shown yet counts as RoomMind's, as does a setpoint the device reports while RoomMind switches its mode (until the device shows that mode and up to a minute after, at most 5 minutes after the command). A mode picked on the device itself does not count as such a switch. Everything else counts as a change on the device, also a device's own weekly program, its frost or window protection setting a setpoint, or an automation writing to the device. Leave the option off for such devices.
-- Like every override, the taken-over target outranks vacation, presence and an empty room, and lifts the outdoor temperature limits while it lasts.
-- After a device was unavailable, or after a room was not controlled for a while (e.g. its area was deleted), the first setpoint it reports is not taken over.
-- While climate control is off for the room or globally, nothing is taken over: RoomMind sends no commands then, the device keeps whatever is set on it.
+- Thermostats always change the heating side. An AC with a single setpoint in `heat_cool`/`auto` changes the side it reports heating or cooling for; when it reports neither, or is off or in fan mode, it counts only in heat-only or cool-only rooms.
+- RoomMind cannot see who changed a setpoint. Its own echo and mode-switch settling are ignored; a device's weekly program, frost/window protection, or an automation still count as a device change. Leave **Take over** off for such devices (Gradual ACs still adopt the number as the held trim — that path does not need Take over).
+- Like every override, a taken-over room target outranks vacation, presence and an empty room.
+- After a device was unavailable, or after a room was not controlled for a while, the first setpoint it reports is not taken over as a room override.
+- While climate control is off, RoomMind sends no commands; the device keeps whatever is set on it.
 
 ## Setpoint Mode: Proportional vs Direct
 
@@ -126,7 +132,9 @@ The fields are on the device, in the room's device editor, for a climate device 
 
 When the room is colder than the target, RoomMind puts the unit in `heat` and raises the setpoint already on the unit. Fixed step always moves one maximum step. Delta step moves by the room's distance from the target (capped at 5 °C), so a larger gap means a larger change. When the room is warmer, it lowers the setpoint. Cooling uses the cooling target the same way. The setpoint may sit at most 5 °C above or below the room target (enough for a cold outdoor gap, not a run-away 28–30 °C). Inside the deadband (Fixed: the same as the step; Delta: the Deadband field) — and while idle — the setpoint steps back toward the room target, so a high trim does not stick. There is no separate outdoor curve.
 
-When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. `Never idle` and **Keep heat when outdoor is cold** leave the unit in `heat` (or `cool`) only — they do not rewrite the setpoint. Gradual eases the setpoint toward the room target on its interval. A later heating run continues from that eased value, not from the boosted max. A manual change on the unit replaces the held Gradual value (see [Changes Made on the Device](#changes-made-on-the-device)).
+When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. `Never idle` and **Keep heat when outdoor is cold** leave the unit in `heat` (or `cool`) only — they do not rewrite the setpoint. Gradual eases the setpoint toward the room target on its interval. A later heating run continues from that eased value, not from the boosted max.
+
+**Manual trim:** changing the unit's thermostat (remote / cloud / HA) replaces the held Gradual setpoint and resets the adjustment clock. The room target stays where the schedule or room climate left it. Details: [Changes Made on the Device](#changes-made-on-the-device).
 
 `Compressor run sensor` (optional): a sensor such as ENERGY Period, used when the climate entity does not report `hvac_action`. A value below 1 means the compressor is off. RoomMind uses this to train Intelligent control. It does not keep heating on at the target.
 
@@ -208,7 +216,7 @@ The setback offset and auto-off apply only while **When idle** is Setback. They 
 
 ### Never idle
 
-RoomMind leaves the unit in `heat` or `cool`. It does not turn the device off, switch to fan-only, apply a setback, or change the setpoint. Gradual thermostat (when enabled) still eases the setpoint toward the room target; otherwise the last commanded setpoint stays. The heat pump's own thermostat starts and stops the compressor from that setpoint.
+RoomMind leaves the unit in `heat` or `cool` (HVAC mode only). It does not turn the device off, switch to fan-only, apply a setback, or rewrite the setpoint. Gradual thermostat (when enabled) still eases the setpoint toward the room target on its interval; otherwise the last commanded setpoint stays. The heat pump's own thermostat starts and stops the compressor from that setpoint.
 
 A schedule or away action that turns the room off, an open window, and climate control switched off still stop the unit.
 

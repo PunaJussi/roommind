@@ -11,8 +11,9 @@ Tämä repositorio on julkinen forkki virallisesta RoomMindistä (`snazzybean/ro
 
 ## 1.8.2.11
 
-- Manuaalinen ILP-setpoint korvaa Gradualin held-arvon (huoneen tavoite ennallaan); intervalli nollautuu.
-- Coordinator `UPDATE_INTERVAL` 30 → **120** s.
+- Manuaalinen ILP-setpoint (kaukosäädin / MelCloud / HA) korvaa Gradualin held-arvon kuin RoomMind olisi asettanut sen; adjustment-intervalli nollautuu. Huoneen tavoite ei muutu (`follow_device_setpoint` edelleen erillinen optio).
+- Coordinator `UPDATE_INTERVAL` 30 → **120** s (ohjaussilmukan tarkistusväli; Gradual-askel edelleen laitteen Adjustment interval).
+- Käyttäjädok: [control-and-devices.md](control-and-devices.md) — *Changes Made on the Device* / *Gradual thermostat*.
 
 ## 1.8.2.10
 

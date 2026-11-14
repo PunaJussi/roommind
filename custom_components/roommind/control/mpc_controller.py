@@ -42,6 +42,7 @@ from ..const import (
     PROPORTIONAL_DEADBAND_NEAR_TARGET_C,
     PROPORTIONAL_SETPOINT_DWELL_SECONDS,
     SETPOINT_RAMP_MODE_DELTA,
+    SETPOINT_RAMP_OFFSET_MAX,
     SETPOINT_RAMP_STEP_MAX,
     VALVE_OVERSHOOT_STOP_K,
     VALVE_PROPORTIONAL_BAND_K,
@@ -53,6 +54,7 @@ from ..managers.heat_source_orchestrator import evaluate_heat_sources
 from ..utils.device_utils import (
     DEFAULT_IDLE_SETBACK_OFFSET,
     IDLE_ACTION_FAN_ONLY,
+    IDLE_ACTION_HOLD,
     IDLE_ACTION_LOW,
     IDLE_ACTION_OFF,
     IDLE_ACTION_SETBACK,
@@ -61,15 +63,22 @@ from ..utils.device_utils import (
     get_all_entity_ids,
     get_device_by_eid,
     get_direct_setpoint_eids,
+    get_fan_speed_policy,
     get_idle_action,
+    get_idle_heat_outdoor_lock,
     get_setback_auto_off,
+    get_setback_offset,
     get_setpoint_offset,
     get_setpoint_offsets,
     get_trv_eids,
     get_valve_entities,
     has_reliable_hvac_modes,
+    outdoor_heat_lock_should_hold,
+    resolve_fan_mode,
 )
+from ..utils.presence_utils import is_any_entity_on
 from ..utils.temp_utils import celsius_delta_to_ha, celsius_to_ha_temp, ha_temp_to_celsius
+
 from .direct_valve import async_release_valve, async_set_valve, clear_valve_cache
 from .mpc_optimizer import MPCOptimizer, MPCPlan, preheat_max_blocks, slow_start_penalty
 from .residual_heat import get_min_run_blocks, mean_rebound
@@ -97,6 +106,10 @@ _last_by_service: dict[tuple[str, str], dict[str, Any]] = {}
 # entries because those are exposed in diagnostics.
 _sent_at: dict[tuple[str, str], float] = {}
 _setpoint_override_warned: set[str] = set()
+# Outdoor heat lock latch per AC entity: stays on until outdoor is readable and
+# above threshold + hysteresis. In-memory only; a reload starts unlatched unless
+# the sensor is unavailable (fail-safe hold).
+_outdoor_heat_lock_latched: dict[str, bool] = {}
 # Resolved (heat, cool) targets at each device's last active command, so the compressor
 # hold can tell a deliberate target change from a room that merely reached its target.
 _active_targets: dict[str, tuple[float | None, float | None]] = {}
@@ -223,6 +236,69 @@ def match_fan_mode(state: Any, desired: str) -> str | None:
     return None
 
 
+def _fan_level_active(hass: HomeAssistant, enabled: bool, entities: tuple[str, ...]) -> bool:
+    """True when a fan level is switched on and any listed entity is on (OR)."""
+    return bool(enabled and is_any_entity_on(hass, entities))
+
+
+async def async_apply_device_fan_speed(
+    hass: HomeAssistant,
+    entity_id: str,
+    devices: list[dict],
+    *,
+    area_id: str = "unknown",
+) -> None:
+    """Apply Default / Occupied / Override fan hierarchy for an AC.
+
+    Coil dry ownership is handled by the coordinator (those devices never reach
+    ``async_apply``). Empty resolved mode means do not send ``set_fan_mode``.
+    """
+    policy = get_fan_speed_policy(devices, entity_id)
+    override_active = _fan_level_active(hass, policy.override_enabled, policy.override_entities)
+    occupied = _fan_level_active(hass, policy.occupied_enabled, policy.occupied_entities)
+    desired = resolve_fan_mode(policy, override_active=override_active, occupied=occupied)
+    if not desired:
+        return
+
+    state = hass.states.get(entity_id)
+    fan_mode = match_fan_mode(state, desired)
+    if fan_mode is None:
+        _LOGGER.debug(
+            "Area '%s': device '%s' does not support fan_mode '%s' (available: %s)",
+            area_id,
+            entity_id,
+            desired,
+            (state.attributes.get("fan_modes") or []) if state else [],
+        )
+        return
+
+    if state is not None and state.attributes.get("fan_mode") == fan_mode:
+        return
+
+    if _should_use_cache(state):
+        cached_fan = _last_by_service.get((entity_id, "set_fan_mode"))
+        if cached_fan is not None and cached_fan.get("fan_mode") == fan_mode:
+            return
+
+    try:
+        await hass.services.async_call(
+            "climate",
+            "set_fan_mode",
+            {"entity_id": entity_id, "fan_mode": fan_mode},
+            blocking=True,
+            context=make_roommind_context(),
+        )
+        _note_applied(entity_id, "set_fan_mode", {"fan_mode": fan_mode})
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "Area '%s': climate.set_fan_mode('%s') failed on '%s'",
+            area_id,
+            fan_mode,
+            entity_id,
+            exc_info=True,
+        )
+
+
 def is_hold_throttled(entity_id: str) -> bool:
     """True once the compressor hold throttled this device or passed it the plain target."""
     return entity_id in _hold_modulated
@@ -298,6 +374,7 @@ def clear_command_cache() -> None:
     _active_targets.clear()
     _overshoot_sent.clear()
     _hold_modulated.clear()
+    _outdoor_heat_lock_latched.clear()
     clear_valve_cache()
 
 
@@ -573,6 +650,132 @@ async def async_turn_off_climate(
         )
 
 
+def _read_outdoor_sensor_celsius(hass: HomeAssistant, entity_id: str) -> float | None:
+    """Return a sensor's temperature in °C, or None when missing/unavailable/unknown."""
+    state = hass.states.get(entity_id)
+    if state is None or state.state in ("unavailable", "unknown", "", None):
+        return None
+    try:
+        raw = float(state.state)
+    except (TypeError, ValueError):
+        return None
+    return ha_temp_to_celsius(hass, raw, entity_id=entity_id)
+
+
+def _heating_idle_context(state: Any, previous_mode: str, climate_mode: str) -> bool:
+    """True when outdoor heat lock may keep heat (not a cooling idle)."""
+    if climate_mode == CLIMATE_MODE_COOL_ONLY:
+        return False
+    if previous_mode == MODE_COOLING:
+        return False
+    if state is not None and state.state == "cool":
+        return False
+    return True
+
+
+def _resolve_hold_hvac_mode(
+    state: Any,
+    targets: TargetTemps | None,
+    *,
+    force_heat: bool,
+    previous_mode: str,
+    climate_mode: str,
+) -> str | None:
+    """heat/cool to keep during Never idle / outdoor lock, or None if not applicable."""
+    current = state.state if state else None
+    if force_heat:
+        mode = "heat"
+    elif current in ("heat", "cool"):
+        mode = current
+    elif climate_mode == CLIMATE_MODE_COOL_ONLY or previous_mode == MODE_COOLING:
+        mode = "cool"
+    else:
+        mode = "heat"
+    if mode == "heat" and (targets is None or targets.heat is None):
+        return None
+    if mode == "cool" and (targets is None or targets.cool is None):
+        return None
+    return mode
+
+
+async def _async_hold_hvac(
+    hass: HomeAssistant,
+    entity_id: str,
+    devices: list[dict],
+    *,
+    area_id: str,
+    targets: TargetTemps | None,
+    use_setpoint_offset: bool,  # noqa: ARG001 — kept for call-site stability
+    head_offset: float,  # noqa: ARG001 — setpoint belongs to Gradual / last heat command
+    force_heat: bool,
+    previous_mode: str,
+    climate_mode: str,
+    fallback_temp: float | None,
+) -> None:
+    """Keep the unit in heat/cool mode only (Never idle / outdoor lock).
+
+    Never idle and outdoor lock must not touch the setpoint. Gradual thermostat
+    (or the last heating/cooling command) owns temperature; this path only
+    prevents the unit from leaving heat/cool while the room is idle.
+    """
+    state = hass.states.get(entity_id)
+    hold_mode = _resolve_hold_hvac_mode(
+        state,
+        targets,
+        force_heat=force_heat,
+        previous_mode=previous_mode,
+        climate_mode=climate_mode,
+    )
+    if hold_mode is None or state is None or targets is None:
+        await async_turn_off_climate(hass, entity_id, area_id=area_id, fallback_setpoint=fallback_temp)
+        return
+
+    room_target = targets.heat if hold_mode == "heat" else targets.cool
+    if room_target is None:
+        await async_turn_off_climate(hass, entity_id, area_id=area_id, fallback_setpoint=fallback_temp)
+        return
+
+    hvac_modes: list[str] = state.attributes.get("hvac_modes") or []
+    ac_mode = hold_mode
+    if ac_mode not in hvac_modes:
+        if hold_mode == "heat":
+            for candidate in ("heat_cool", "auto"):
+                if candidate in hvac_modes:
+                    ac_mode = candidate
+                    break
+            else:
+                await async_turn_off_climate(hass, entity_id, area_id=area_id, fallback_setpoint=fallback_temp)
+                return
+        elif "heat_cool" in hvac_modes:
+            ac_mode = "heat_cool"
+        elif "auto" in hvac_modes:
+            ac_mode = "auto"
+        else:
+            await async_turn_off_climate(hass, entity_id, area_id=area_id, fallback_setpoint=fallback_temp)
+            return
+
+    if state.state == ac_mode:
+        return
+
+    try:
+        await hass.services.async_call(
+            "climate",
+            "set_hvac_mode",
+            {"entity_id": entity_id, "hvac_mode": ac_mode},
+            blocking=True,
+            context=make_roommind_context(),
+        )
+        _remember_command(entity_id, "set_hvac_mode", {"hvac_mode": ac_mode})
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "Area '%s': climate.set_hvac_mode(%s) failed on '%s' (hold)",
+            area_id,
+            ac_mode,
+            entity_id,
+            exc_info=True,
+        )
+
+
 async def async_idle_device(
     hass: HomeAssistant,
     entity_id: str,
@@ -584,18 +787,27 @@ async def async_idle_device(
     use_setpoint_offset: bool = True,
     release_setback: frozenset[str] = frozenset(),
     head_offset: float = 0.0,
-    ramp: SetpointRamp | None = None,
+    ramp: SetpointRamp | None = None,  # noqa: ARG001 — kept for callers; fine-tune eases/clears
+    outdoor_temp: float | None = None,
+    previous_mode: str = MODE_IDLE,
+    climate_mode: str = "auto",
+    apply_outdoor_lock: bool = False,
 ) -> None:
     """Idle a climate device per its configured idle_action.
 
-    ``ramp`` forgets a gradual AC setpoint, so the next run seeds from the
-    temperature already on the unit instead of continuing a run that ended.
+    ``ramp`` is accepted for callers that used to forget a gradual AC
+    setpoint here. Idle no longer clears it: the setpoint eases toward the
+    room target, and the next heating run continues from that value.
 
     "off"      -> async_turn_off_climate() (existing behavior)
     "fan_only" -> hvac_mode=fan_only + set_fan_mode(idle_fan_mode)
     "setback"  -> keep current hvac_mode, shift target by offset
+    "hold"     -> keep heat/cool mode only; never rewrite setpoint (Never idle)
     "low"      -> lower setpoint to device min_temp, never send set_hvac_mode(off)
     Falls back to off when the configured action is not applicable.
+
+    Outdoor heat lock, when enabled on an AC, overrides fan_only/off/setback
+    with hold-in-heat while outdoor is below the threshold or unavailable.
 
     ``use_setpoint_offset`` lets the setback keep a direct device's sensor
     offset (#369); the controller turns it off in Managed mode.
@@ -617,9 +829,20 @@ async def async_idle_device(
     Zigbee TRVs enter deep sleep in hvac_mode=off and lose later wake-up
     commands (#183), and lowering to min_temp already stops all heat output.
     """
-    if ramp is not None:
-        ramp.clear(entity_id)
-    idle_action, idle_fan_mode = get_idle_action(devices, entity_id)
+    idle_action, _idle_fan_mode = get_idle_action(devices, entity_id)
+    hold_force_heat = False
+    lock_enabled, lock_sensor, lock_below = get_idle_heat_outdoor_lock(devices, entity_id)
+    if force_off or not lock_enabled:
+        _outdoor_heat_lock_latched.pop(entity_id, None)
+    elif apply_outdoor_lock:
+        outdoor_c = _read_outdoor_sensor_celsius(hass, lock_sensor) if lock_sensor else outdoor_temp
+        was_latched = _outdoor_heat_lock_latched.get(entity_id, False)
+        now_latched = outdoor_heat_lock_should_hold(outdoor_c, lock_below, was_latched)
+        _outdoor_heat_lock_latched[entity_id] = now_latched
+        state_for_lock = hass.states.get(entity_id)
+        if now_latched and _heating_idle_context(state_for_lock, previous_mode, climate_mode):
+            idle_action = IDLE_ACTION_HOLD
+            hold_force_heat = True
     if force_off and idle_action != IDLE_ACTION_LOW:
         idle_action = IDLE_ACTION_OFF
 
@@ -676,10 +899,11 @@ async def async_idle_device(
         # Direct devices keep their sensor offset (#369), but only where the active
         # path applies it too (Full Control).
         sensor_offset = get_setpoint_offset(devices, entity_id) if use_setpoint_offset else 0.0
+        setback_offset = get_setback_offset(devices, entity_id)
         if current_hvac == "heat" and targets.heat is not None:
-            setback_temp = targets.heat + sensor_offset + head_offset - DEFAULT_IDLE_SETBACK_OFFSET
+            setback_temp = targets.heat + sensor_offset + head_offset - setback_offset
         elif current_hvac == "cool" and targets.cool is not None:
-            setback_temp = targets.cool + sensor_offset + head_offset + DEFAULT_IDLE_SETBACK_OFFSET
+            setback_temp = targets.cool + sensor_offset + head_offset + setback_offset
         else:
             await async_turn_off_climate(hass, entity_id, area_id=area_id, fallback_setpoint=fallback_temp)
             return
@@ -706,12 +930,14 @@ async def async_idle_device(
         # Redundancy check: already at setback temp
         current_temp_attr = state.attributes.get("temperature")
         if current_temp_attr is not None and abs(float(current_temp_attr) - ha_t) < 0.1:
+            await async_apply_device_fan_speed(hass, entity_id, devices, area_id=area_id)
             return
 
         # Cache check (only for devices without reliable state feedback)
         if _should_use_cache(state):
             cached = _last_commands.get(entity_id)
             if cached and cached.get("service") == "set_temperature" and cached.get("temperature") == ha_t:
+                await async_apply_device_fan_speed(hass, entity_id, devices, area_id=area_id)
                 return
 
         _LOGGER.debug(
@@ -738,6 +964,25 @@ async def async_idle_device(
                 entity_id,
                 exc_info=True,
             )
+        await async_apply_device_fan_speed(hass, entity_id, devices, area_id=area_id)
+        return
+
+    # --- HOLD (Never idle) branch ---
+    if idle_action == IDLE_ACTION_HOLD:
+        await _async_hold_hvac(
+            hass,
+            entity_id,
+            devices,
+            area_id=area_id,
+            targets=targets,
+            use_setpoint_offset=use_setpoint_offset,
+            head_offset=head_offset,
+            force_heat=hold_force_heat,
+            previous_mode=previous_mode,
+            climate_mode=climate_mode,
+            fallback_temp=fallback_temp,
+        )
+        await async_apply_device_fan_speed(hass, entity_id, devices, area_id=area_id)
         return
 
     # --- OFF branch ---
@@ -757,15 +1002,23 @@ async def async_idle_device(
         await async_turn_off_climate(hass, entity_id, area_id=area_id, fallback_setpoint=fallback_temp)
         return
 
+    policy = get_fan_speed_policy(devices, entity_id)
+    override_active = _fan_level_active(hass, policy.override_enabled, policy.override_entities)
+    occupied = _fan_level_active(hass, policy.occupied_enabled, policy.occupied_entities)
+    desired_fan = resolve_fan_mode(
+        policy,
+        override_active=override_active,
+        occupied=occupied,
+    )
     # A fan mode the device does not have is left alone, like an empty idle_fan_mode:
     # waiting for the device to report it would resend fan_only every cycle.
-    fan_mode = match_fan_mode(state, idle_fan_mode) if idle_fan_mode else None
-    if idle_fan_mode and fan_mode is None:
+    fan_mode = match_fan_mode(state, desired_fan) if desired_fan else None
+    if desired_fan and fan_mode is None:
         _LOGGER.debug(
             "Area '%s': device '%s' does not support fan_mode '%s' (available: %s)",
             area_id,
             entity_id,
-            idle_fan_mode,
+            desired_fan,
             (state.attributes.get("fan_modes") or []) if state else [],
         )
 
@@ -804,24 +1057,7 @@ async def async_idle_device(
         )
         return
 
-    if fan_mode is not None:
-        try:
-            await hass.services.async_call(
-                "climate",
-                "set_fan_mode",
-                {"entity_id": entity_id, "fan_mode": fan_mode},
-                blocking=True,
-                context=make_roommind_context(),
-            )
-            _note_applied(entity_id, "set_fan_mode", {"fan_mode": fan_mode})
-        except Exception:  # noqa: BLE001
-            _LOGGER.warning(
-                "Area '%s': climate.set_fan_mode('%s') failed on '%s'",
-                area_id,
-                fan_mode,
-                entity_id,
-                exc_info=True,
-            )
+    await async_apply_device_fan_speed(hass, entity_id, devices, area_id=area_id)
 
 
 def resolve_hvac_mode(desired: str, hvac_modes: list[str]) -> str | None:
@@ -2438,6 +2674,9 @@ class MPCController:
                     )
                     continue
                 if await self._async_fine_tune_ac(eid, targets, current_temp, MODE_HEATING):
+                    await async_apply_device_fan_speed(
+                        self.hass, eid, self._devices, area_id=self._area_id
+                    )
                     continue
                 shift = self._head_offset(eid, "heat")
                 ha_t, ac_deadband = self._ac_heat_command(
@@ -2466,6 +2705,9 @@ class MPCController:
                         temp_intent="heat",
                         deadband=ac_deadband,
                     )
+                    await async_apply_device_fan_speed(
+                        self.hass, eid, self._devices, area_id=self._area_id
+                    )
                 else:
                     await self._call("set_hvac_mode", {"entity_id": eid, "hvac_mode": "off"})
         elif mode == MODE_COOLING:
@@ -2492,6 +2734,9 @@ class MPCController:
                     )
                     continue
                 if await self._async_fine_tune_ac(eid, targets, current_temp, MODE_COOLING):
+                    await async_apply_device_fan_speed(
+                        self.hass, eid, self._devices, area_id=self._area_id
+                    )
                     continue
                 ha_t, ac_deadband = self._ac_cool_command(
                     eid, ac_cool_target, direct_target, current_temp, effective_target
@@ -2502,6 +2747,9 @@ class MPCController:
                     {"entity_id": eid, "temperature": ha_t, "hvac_mode": "cool"},
                     temp_intent="cool",
                     deadband=ac_deadband,
+                )
+                await async_apply_device_fan_speed(
+                    self.hass, eid, self._devices, area_id=self._area_id
                 )
             for eid in thermostats:
                 if eid in _forced_off:
@@ -2534,6 +2782,10 @@ class MPCController:
                     )
                     if not await self._async_hold_valve(eid, targets):
                         await self._async_hold_retarget(eid, targets, current_temp)
+                    if eid in acs:
+                        await async_apply_device_fan_speed(
+                            self.hass, eid, self._devices, area_id=self._area_id
+                        )
                     continue
                 await async_idle_device(
                     self.hass,
@@ -2546,7 +2798,12 @@ class MPCController:
                     ramp=self._setpoint_ramp,
                     force_off=force_off,
                     release_setback=self._release_setback_for(eid, sitting_out),
+                    outdoor_temp=self.outdoor_temp,
+                    previous_mode=self.previous_mode,
+                    climate_mode=self.climate_mode,
+                    apply_outdoor_lock=True,
                 )
+                await self._async_fine_tune_ac(eid, targets, current_temp, MODE_IDLE)
                 await self._async_release_valve(eid)
 
     def _release_setback_for(self, eid: str, sitting_out: set[str]) -> frozenset[str]:
@@ -2999,56 +3256,98 @@ class MPCController:
 
         Owns the device for the whole heating or cooling run so the proportional
         max-setpoint is never sent. Puts a fan-only unit into heat/cool. Idle
-        is left to ``async_idle_device``.
+        keeps the idle HVAC mode and eases the setpoint toward the room target.
         """
         params = self._ramp_params(eid)
-        if params is None or self._force_off or room_mode not in (MODE_HEATING, MODE_COOLING):
+        if params is None:
             return False
-        ac_mode = self._ramp_hvac_mode(eid, room_mode)
-        if not ac_mode:
+        if self._force_off and room_mode != MODE_IDLE:
+            return False
+        if room_mode not in (MODE_HEATING, MODE_COOLING, MODE_IDLE):
+            return False
+        ramp_mode = (
+            room_mode if room_mode in (MODE_HEATING, MODE_COOLING) else (self._setpoint_ramp.mode(eid) or MODE_HEATING)
+        )
+        if room_mode != MODE_IDLE:
+            ac_mode = self._ramp_hvac_mode(eid, room_mode)
+            if not ac_mode:
+                return True
+            state = self.hass.states.get(eid)
+            if state is None:
+                return True
+            if state.state != ac_mode:
+                await self._call("set_hvac_mode", {"entity_id": eid, "hvac_mode": ac_mode})
+        elif self.hass.states.get(eid) is None:
             return True
-        state = self.hass.states.get(eid)
-        if state is None:
-            return True
-        if state.state != ac_mode:
-            await self._call("set_hvac_mode", {"entity_id": eid, "hvac_mode": ac_mode})
-        target = targets.heat if room_mode == MODE_HEATING else targets.cool
-        if target is None or current_temp is None:
-            return True
-        error = target - current_temp
-        if params.mode == SETPOINT_RAMP_MODE_DELTA:
-            band = params.deadband
-            stride = min(abs(error), SETPOINT_RAMP_STEP_MAX)
+        if room_mode == MODE_COOLING:
+            target = targets.cool
+        elif room_mode == MODE_HEATING:
+            target = targets.heat
         else:
-            band = params.step
+            target = targets.heat if targets.heat is not None else targets.cool
+        if target is None:
+            return True
+        lo = target - SETPOINT_RAMP_OFFSET_MAX
+        hi = target + SETPOINT_RAMP_OFFSET_MAX
+        current_sp = self._setpoint_ramp.setpoint(eid)
+        if current_sp is None:
+            current_sp = self._device_setpoint_celsius(eid)
+        ease = True
+        error = 0.0
+        if room_mode != MODE_IDLE and current_temp is not None:
+            error = target - current_temp
+            band = params.deadband if params.mode == SETPOINT_RAMP_MODE_DELTA else params.step
+            if abs(error) > band + 1e-9:
+                ease = False
+        if not ease:
+            if room_mode == MODE_COOLING:
+                desired = lo if error < 0 else hi
+            else:
+                desired = hi if error > 0 else lo
+            stride = min(abs(error), SETPOINT_RAMP_STEP_MAX) if params.mode == SETPOINT_RAMP_MODE_DELTA else params.step
+        else:
+            desired = target
             stride = params.step
-        if abs(error) <= band + 1e-9:
+            if current_sp is not None and abs(current_sp - target) <= 0.05:
+                self._setpoint_ramp.clear(eid)
+                return True
+        if current_sp is None:
+            direction = 0
+        elif abs(current_sp - desired) <= 0.05:
             direction = 0
         else:
-            direction = 1 if error > 0 else -1
+            direction = 1 if desired > current_sp else -1
         limited = self._setpoint_ramp.advance(
             eid,
-            room_mode,
+            ramp_mode,
             time.time(),
             minutes=params.minutes,
             step=stride,
             direction=direction,
             seed=self._device_setpoint_celsius(eid),
             device_step=self._device_step_celsius(eid),
+            desired=desired,
         )
         if limited is None:
             return True
+        capped = min(hi, max(lo, limited))
+        if abs(capped - limited) > 0.05:
+            self._setpoint_ramp.note(eid, capped, ramp_mode, time.time())
+            limited = capped
         ha_t = self._clamp_ha_setpoint(eid, celsius_to_ha_temp(self.hass, limited))
         try:
             clamped = ha_temp_to_celsius(self.hass, ha_t, entity_id=eid)
         except (TypeError, ValueError):
             clamped = limited
         if abs(clamped - limited) > 0.05:
-            self._setpoint_ramp.note(eid, clamped, room_mode, time.time())
+            self._setpoint_ramp.note(eid, clamped, ramp_mode, time.time())
+            limited = clamped
+        if ease and abs(limited - target) <= 0.05:
+            self._setpoint_ramp.clear(eid)
         await self._call(
             "set_temperature",
             {"entity_id": eid, "temperature": ha_t},
-            temp_intent="heat" if room_mode == MODE_HEATING else "cool",
+            temp_intent="heat" if ramp_mode == MODE_HEATING else "cool",
         )
         return True
 

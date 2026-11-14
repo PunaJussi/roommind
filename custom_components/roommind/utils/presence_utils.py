@@ -76,6 +76,15 @@ def _is_entity_home(state: State) -> bool:
     return bool(state.state == "on")
 
 
+def is_any_entity_on(hass: HomeAssistant, entity_ids: list[str] | tuple[str, ...]) -> bool:
+    """True if any listed entity is ``on`` (OR). Unknown/unavailable/missing are not on."""
+    for eid in entity_ids:
+        state = hass.states.get(eid)
+        if state is not None and state.state == "on":
+            return True
+    return False
+
+
 def is_room_vacant(hass: HomeAssistant, room: dict, now: float) -> bool:
     """Return True once every occupancy sensor of an occupancy-eco room has been off for the delay (#180).
 

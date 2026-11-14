@@ -382,7 +382,9 @@ async def test_mpc_apply_idle_forced_on_overrides_fan_only():
     calls = hass.services.async_call.call_args_list
     fan_only_calls = [c for c in calls if c[0][1] == "set_hvac_mode" and c[0][2].get("hvac_mode") == "fan_only"]
     assert len(fan_only_calls) == 0
-    assert calls == []
+    # Compressor hold keeps the HVAC mode; Default fan speed may still be applied.
+    assert all(c[0][1] == "set_fan_mode" for c in calls)
+    assert any(c[0][2].get("fan_mode") == "low" for c in calls)
 
 
 @pytest.mark.asyncio
@@ -1500,3 +1502,176 @@ def test_match_fan_mode(fan_modes, desired, expected):
     state = MagicMock()
     state.attributes = {"fan_modes": fan_modes}
     assert match_fan_mode(state, desired) == expected
+
+
+@pytest.mark.asyncio
+async def test_async_idle_device_occupied_fan_mode_or():
+    """Any occupied entity on selects occupied_fan_mode over default."""
+    from custom_components.roommind.control.mpc_controller import clear_command_cache
+
+    clear_command_cache()
+    hass = build_hass()
+    ac = MagicMock()
+    ac.state = "cool"
+    ac.attributes = {
+        "hvac_modes": ["cool", "fan_only", "off"],
+        "fan_modes": ["1", "2", "3", "4", "5"],
+        "fan_mode": "1",
+    }
+    occ_off = MagicMock()
+    occ_off.state = "off"
+    occ_on = MagicMock()
+    occ_on.state = "on"
+
+    def _get(eid):
+        return {
+            "climate.ac1": ac,
+            "binary_sensor.a": occ_off,
+            "binary_sensor.b": occ_on,
+        }.get(eid)
+
+    hass.states.get = MagicMock(side_effect=_get)
+    devices = [
+        {
+            "entity_id": "climate.ac1",
+            "type": "ac",
+            "role": "auto",
+            "idle_action": "fan_only",
+            "idle_fan_mode": "1",
+            "occupied_fan_enabled": True,
+            "occupied_fan_entities": ["binary_sensor.a", "binary_sensor.b"],
+            "occupied_fan_mode": "3",
+            "override_fan_enabled": True,
+            "override_fan_mode": "5",
+        }
+    ]
+    await async_idle_device(hass, "climate.ac1", devices, area_id="living_room")
+    fan_calls = [c for c in hass.services.async_call.call_args_list if c[0][1] == "set_fan_mode"]
+    assert len(fan_calls) == 1
+    assert fan_calls[0][0][2]["fan_mode"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_async_idle_device_hold_does_not_force_override_fan_mode():
+    """Never idle (hold) uses Default unless an override entity is on."""
+    from custom_components.roommind.control.mpc_controller import clear_command_cache
+
+    clear_command_cache()
+    hass = build_hass()
+    ac = MagicMock()
+    ac.state = "heat"
+    ac.attributes = {
+        "hvac_modes": ["heat", "cool", "fan_only", "off"],
+        "fan_modes": ["1", "2", "3", "4", "5"],
+        "fan_mode": "1",
+        "temperature": 21.0,
+        "min_temp": 16,
+        "max_temp": 30,
+    }
+    occ = MagicMock()
+    occ.state = "on"
+    hass.states.get = MagicMock(side_effect=lambda eid: ac if eid.startswith("climate.") else occ)
+    devices = [
+        {
+            "entity_id": "climate.ac1",
+            "type": "ac",
+            "role": "auto",
+            "idle_action": "hold",
+            "idle_fan_mode": "1",
+            "occupied_fan_enabled": True,
+            "occupied_fan_entities": ["binary_sensor.occ"],
+            "occupied_fan_mode": "3",
+            "override_fan_enabled": True,
+            "override_fan_mode": "5",
+        }
+    ]
+    await async_idle_device(
+        hass,
+        "climate.ac1",
+        devices,
+        area_id="living_room",
+        targets=TargetTemps(heat=21.0, cool=25.0),
+        previous_mode="heating",
+        climate_mode="auto",
+    )
+    fan_calls = [c for c in hass.services.async_call.call_args_list if c[0][1] == "set_fan_mode"]
+    assert len(fan_calls) == 1
+    assert fan_calls[0][0][2]["fan_mode"] == "3"
+
+
+@pytest.mark.asyncio
+async def test_async_apply_override_entity_or():
+    """Any override entity on selects override_fan_mode over occupied."""
+    from custom_components.roommind.control.mpc_controller import (
+        async_apply_device_fan_speed,
+        clear_command_cache,
+    )
+
+    clear_command_cache()
+    hass = build_hass()
+    ac = MagicMock()
+    ac.state = "heat"
+    ac.attributes = {"fan_modes": ["1", "3", "5"], "fan_mode": "1"}
+    occ = MagicMock()
+    occ.state = "on"
+    ov_off = MagicMock()
+    ov_off.state = "off"
+    ov_on = MagicMock()
+    ov_on.state = "on"
+
+    def _get(eid):
+        return {
+            "climate.ac1": ac,
+            "binary_sensor.occ": occ,
+            "input_boolean.a": ov_off,
+            "input_boolean.b": ov_on,
+        }.get(eid)
+
+    hass.states.get = MagicMock(side_effect=_get)
+    devices = [
+        {
+            "entity_id": "climate.ac1",
+            "type": "ac",
+            "idle_fan_mode": "1",
+            "occupied_fan_enabled": True,
+            "occupied_fan_entities": ["binary_sensor.occ"],
+            "occupied_fan_mode": "3",
+            "override_fan_enabled": True,
+            "override_fan_entities": ["input_boolean.a", "input_boolean.b"],
+            "override_fan_mode": "5",
+        }
+    ]
+    await async_apply_device_fan_speed(hass, "climate.ac1", devices, area_id="r")
+    fan_calls = [c for c in hass.services.async_call.call_args_list if c[0][1] == "set_fan_mode"]
+    assert len(fan_calls) == 1
+    assert fan_calls[0][0][2]["fan_mode"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_async_apply_device_fan_speed_unknown_not_occupied():
+    """unknown/unavailable occupancy entities do not trigger occupied speed."""
+    from custom_components.roommind.control.mpc_controller import (
+        async_apply_device_fan_speed,
+        clear_command_cache,
+    )
+
+    clear_command_cache()
+    hass = build_hass()
+    ac = MagicMock()
+    ac.state = "heat"
+    ac.attributes = {"fan_modes": ["1", "3"], "fan_mode": "1"}
+    occ = MagicMock()
+    occ.state = "unavailable"
+    hass.states.get = MagicMock(side_effect=lambda eid: ac if eid.startswith("climate.") else occ)
+    devices = [
+        {
+            "entity_id": "climate.ac1",
+            "type": "ac",
+            "idle_fan_mode": "1",
+            "occupied_fan_enabled": True,
+            "occupied_fan_entities": ["binary_sensor.occ"],
+            "occupied_fan_mode": "3",
+        }
+    ]
+    await async_apply_device_fan_speed(hass, "climate.ac1", devices, area_id="r")
+    hass.services.async_call.assert_not_called()

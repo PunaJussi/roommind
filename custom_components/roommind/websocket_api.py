@@ -56,6 +56,12 @@ from .utils.device_utils import (
     DEFAULT_COIL_DRY_FAN_MODE,
     DEFAULT_COIL_DRY_MIN_COOLING_MINUTES,
     DEFAULT_COIL_DRY_MINUTES,
+    DEFAULT_IDLE_HEAT_OUTDOOR_BELOW,
+    DEFAULT_IDLE_SETBACK_OFFSET,
+    IDLE_HEAT_OUTDOOR_BELOW_MAX,
+    IDLE_HEAT_OUTDOOR_BELOW_MIN,
+    SETBACK_OFFSET_MAX,
+    SETBACK_OFFSET_MIN,
     SETPOINT_OFFSET_MAX,
     SETPOINT_OFFSET_MIN,
     VALVE_CLOSING_MODES,
@@ -108,9 +114,28 @@ def _validate_device_idle_action(device: dict) -> dict:
     idle_action="low" lowers the setpoint to min_temp while keeping the
     device in its active hvac_mode. For ACs this would cool continuously
     toward the minimum, which is never the intent. Restrict "low" to TRVs.
+
+    idle_action="hold" (Never idle) keeps heat/cool mode only (no setpoint
+    rewrite) and is AC-only.
     """
     if device.get("type") == "ac" and device.get("idle_action") == "low":
         raise vol.Invalid("idle_action='low' is only supported for TRVs (type='trv')")
+    if device.get("type") == "trv" and device.get("idle_action") == "hold":
+        raise vol.Invalid("idle_action='hold' is only supported for ACs (type='ac')")
+    return device
+
+
+def _validate_device_outdoor_lock(device: dict) -> dict:
+    """Outdoor heat lock is AC-only; a sensor must be a sensor entity."""
+    sensor = device.get("idle_heat_outdoor_sensor") or ""
+    if device.get("type") != "ac":
+        device["idle_heat_outdoor_lock"] = False
+        device["idle_heat_outdoor_sensor"] = ""
+        device["idle_heat_outdoor_below"] = DEFAULT_IDLE_HEAT_OUTDOOR_BELOW
+        return device
+    if sensor and not str(sensor).startswith("sensor."):
+        raise vol.Invalid("idle_heat_outdoor_sensor must be a sensor entity")
+    device["idle_heat_outdoor_sensor"] = sensor
     return device
 
 
@@ -122,6 +147,58 @@ def _validate_device_coil_dry(device: dict) -> dict:
     """
     if device.get("type") == "trv" and device.get("coil_dry") == COIL_DRY_ON:
         raise vol.Invalid("coil_dry='on' is only supported for ACs (type='ac')")
+    return device
+
+
+_FAN_TRIGGER_DOMAINS = (
+    "binary_sensor",
+    "input_boolean",
+    "switch",
+    "schedule",
+    "calendar",
+)
+
+
+def _clean_fan_trigger_entities(value: object, field: str) -> list[str]:
+    """Entity ids whose ``on`` state can trigger a fan level; unique, order preserved."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise vol.Invalid(f"{field} must be a list")
+    cleaned: list[str] = []
+    for eid in value:
+        if not isinstance(eid, str) or not eid:
+            raise vol.Invalid(f"{field} entries must be entity ids")
+        domain = eid.split(".", 1)[0]
+        if domain not in _FAN_TRIGGER_DOMAINS:
+            raise vol.Invalid(
+                f"{field} must be binary_sensor, input_boolean, switch, schedule or calendar"
+            )
+        if eid not in cleaned:
+            cleaned.append(eid)
+    return cleaned
+
+
+def _validate_device_fan_speed_policy(device: dict) -> dict:
+    """Occupied/override fan speeds are AC-only; TRVs keep empty defaults."""
+    if device.get("type") != "ac":
+        device["occupied_fan_enabled"] = False
+        device["occupied_fan_entities"] = []
+        device["occupied_fan_mode"] = ""
+        device["override_fan_enabled"] = False
+        device["override_fan_entities"] = []
+        device["override_fan_mode"] = ""
+        return device
+    device["occupied_fan_enabled"] = bool(device.get("occupied_fan_enabled", False))
+    device["occupied_fan_entities"] = _clean_fan_trigger_entities(
+        device.get("occupied_fan_entities") or [], "occupied_fan_entities"
+    )
+    device["occupied_fan_mode"] = str(device.get("occupied_fan_mode") or "")
+    device["override_fan_enabled"] = bool(device.get("override_fan_enabled", False))
+    device["override_fan_entities"] = _clean_fan_trigger_entities(
+        device.get("override_fan_entities") or [], "override_fan_entities"
+    )
+    device["override_fan_mode"] = str(device.get("override_fan_mode") or "")
     return device
 
 
@@ -447,10 +524,25 @@ async def websocket_list_rooms(
                     vol.Required("type"): vol.In(["trv", "ac"]),
                     vol.Optional("role", default="auto"): vol.In(["primary", "secondary", "auto"]),
                     vol.Optional("heating_system_type", default=""): vol.In(["", "radiator", "underfloor"]),
-                    vol.Optional("idle_action", default="off"): vol.In(["off", "fan_only", "setback", "low"]),
+                    vol.Optional("idle_action", default="off"): vol.In(["off", "fan_only", "setback", "low", "hold"]),
                     vol.Optional("idle_fan_mode", default="low"): str,
+                    vol.Optional("occupied_fan_enabled", default=False): bool,
+                    vol.Optional("occupied_fan_entities", default=list): [str],
+                    vol.Optional("occupied_fan_mode", default=""): str,
+                    vol.Optional("override_fan_enabled", default=False): bool,
+                    vol.Optional("override_fan_entities", default=list): [str],
+                    vol.Optional("override_fan_mode", default=""): str,
                     # No default: devices without it keep their stored form (#255)
                     vol.Optional("setback_auto_off"): bool,
+                    vol.Optional("setback_offset", default=DEFAULT_IDLE_SETBACK_OFFSET): vol.All(
+                        vol.Coerce(float), vol.Range(min=SETBACK_OFFSET_MIN, max=SETBACK_OFFSET_MAX)
+                    ),
+                    vol.Optional("idle_heat_outdoor_lock", default=False): bool,
+                    vol.Optional("idle_heat_outdoor_sensor", default=""): str,
+                    vol.Optional("idle_heat_outdoor_below", default=DEFAULT_IDLE_HEAT_OUTDOOR_BELOW): vol.All(
+                        vol.Coerce(float),
+                        vol.Range(min=IDLE_HEAT_OUTDOOR_BELOW_MIN, max=IDLE_HEAT_OUTDOOR_BELOW_MAX),
+                    ),
                     vol.Optional("setpoint_mode", default="proportional"): vol.In(["proportional", "direct"]),
                     vol.Optional("setpoint_offset", default=0.0): vol.All(
                         vol.Coerce(float), vol.Range(min=SETPOINT_OFFSET_MIN, max=SETPOINT_OFFSET_MAX)
@@ -476,7 +568,9 @@ async def websocket_list_rooms(
                 _validate_device_setpoint_ramp,
                 _validate_device_compressor_sensor,
                 _validate_device_idle_action,
+                _validate_device_outdoor_lock,
                 _validate_device_coil_dry,
+                _validate_device_fan_speed_policy,
                 _validate_device_valve,
             )
         ],
@@ -818,12 +912,8 @@ async def websocket_get_settings(
         vol.Optional("outdoor_heating_max"): vol.Coerce(float),
         vol.Optional("control_mode"): vol.In([CONTROL_MODE_MPC, CONTROL_MODE_BANGBANG]),
         vol.Optional("comfort_weight"): vol.Coerce(float),
-        vol.Optional("heat_hysteresis"): vol.All(
-            vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)
-        ),
-        vol.Optional("cool_hysteresis"): vol.All(
-            vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)
-        ),
+        vol.Optional("heat_hysteresis"): vol.All(vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)),
+        vol.Optional("cool_hysteresis"): vol.All(vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)),
         vol.Optional("mpc_start_hysteresis"): vol.All(
             vol.Coerce(float), vol.Range(min=HYSTERESIS_MIN, max=HYSTERESIS_MAX)
         ),

@@ -20,9 +20,12 @@ from custom_components.roommind.utils.device_utils import (
     get_device_by_eid,
     get_direct_setpoint_eids,
     get_entity_ids_by_type,
+    get_fan_speed_policy,
     get_idle_action,
+    get_idle_heat_outdoor_lock,
     get_room_heating_system_type,
     get_setback_auto_off,
+    get_setback_offset,
     get_setpoint_offset,
     get_setpoint_offsets,
     get_trv_eids,
@@ -31,6 +34,8 @@ from custom_components.roommind.utils.device_utils import (
     is_trv_type,
     legacy_to_devices,
     migrate_heat_pump_devices,
+    outdoor_heat_lock_should_hold,
+    resolve_fan_mode,
     room_contributes_to_group,
 )
 
@@ -71,6 +76,12 @@ def test_legacy_to_devices_basic():
         "heating_system_type": "",
         "idle_action": "off",
         "idle_fan_mode": "low",
+        "occupied_fan_enabled": False,
+        "occupied_fan_entities": [],
+        "occupied_fan_mode": "",
+        "override_fan_enabled": False,
+        "override_fan_entities": [],
+        "override_fan_mode": "",
         "setpoint_mode": "proportional",
         "coil_dry": "inherit",
         "coil_dry_minutes": 0,
@@ -392,6 +403,67 @@ def test_legacy_to_devices_includes_idle_defaults():
     assert len(devices) == 1
     assert devices[0]["idle_action"] == "off"
     assert devices[0]["idle_fan_mode"] == "low"
+    assert devices[0]["occupied_fan_enabled"] is False
+    assert devices[0]["occupied_fan_entities"] == []
+    assert devices[0]["occupied_fan_mode"] == ""
+    assert devices[0]["override_fan_enabled"] is False
+    assert devices[0]["override_fan_entities"] == []
+    assert devices[0]["override_fan_mode"] == ""
+
+
+def test_resolve_fan_mode_priority():
+    """Override > occupied > default; empty or disabled levels fall through."""
+    policy = get_fan_speed_policy(
+        [
+            {
+                "entity_id": "climate.ac1",
+                "type": "ac",
+                "idle_fan_mode": "1",
+                "occupied_fan_enabled": True,
+                "occupied_fan_mode": "3",
+                "occupied_fan_entities": ["binary_sensor.occ"],
+                "override_fan_enabled": True,
+                "override_fan_mode": "5",
+                "override_fan_entities": ["input_boolean.ov"],
+            }
+        ],
+        "climate.ac1",
+    )
+    assert resolve_fan_mode(policy, override_active=True, occupied=True) == "5"
+    assert resolve_fan_mode(policy, override_active=False, occupied=True) == "3"
+    assert resolve_fan_mode(policy, override_active=False, occupied=False) == "1"
+
+    disabled_override = get_fan_speed_policy(
+        [
+            {
+                "entity_id": "climate.ac1",
+                "type": "ac",
+                "idle_fan_mode": "1",
+                "occupied_fan_enabled": True,
+                "occupied_fan_mode": "3",
+                "override_fan_enabled": False,
+                "override_fan_mode": "5",
+            }
+        ],
+        "climate.ac1",
+    )
+    assert resolve_fan_mode(disabled_override, override_active=True, occupied=True) == "3"
+
+    keep_default = get_fan_speed_policy(
+        [{"entity_id": "climate.ac1", "type": "ac", "idle_fan_mode": ""}],
+        "climate.ac1",
+    )
+    assert resolve_fan_mode(keep_default, override_active=False, occupied=False) == ""
+
+
+def test_get_fan_speed_policy_trv_empty():
+    """TRVs have no fan policy."""
+    policy = get_fan_speed_policy(
+        [{"entity_id": "climate.trv1", "type": "trv", "idle_fan_mode": "low"}],
+        "climate.trv1",
+    )
+    assert policy.default_mode == ""
+    assert policy.occupied_entities == ()
 
 
 def test_get_idle_action_defaults():
@@ -870,3 +942,38 @@ def test_get_setback_auto_off_is_opt_in():
     assert get_setback_auto_off(devices, "climate.a") is False
     assert get_setback_auto_off(devices, "climate.b") is True
     assert get_setback_auto_off(devices, "climate.missing") is False
+
+
+def test_get_setback_offset_defaults_and_clamps():
+    devices = [
+        {"entity_id": "climate.a", "type": "ac", "idle_action": "setback"},
+        {"entity_id": "climate.b", "type": "ac", "setback_offset": 1.0},
+        {"entity_id": "climate.c", "type": "ac", "setback_offset": 9.0},
+        {"entity_id": "climate.d", "type": "ac", "setback_offset": "nope"},
+    ]
+    assert get_setback_offset(devices, "climate.a") == 2.0
+    assert get_setback_offset(devices, "climate.b") == 1.0
+    assert get_setback_offset(devices, "climate.c") == 5.0
+    assert get_setback_offset(devices, "climate.d") == 2.0
+    assert get_setback_offset(devices, "climate.missing") == 2.0
+
+
+def test_outdoor_heat_lock_should_hold_unavailable_and_hysteresis():
+    assert outdoor_heat_lock_should_hold(None, 0.0, False) is True
+    assert outdoor_heat_lock_should_hold(-1.0, 0.0, False) is True
+    assert outdoor_heat_lock_should_hold(0.5, 0.0, False) is False
+    assert outdoor_heat_lock_should_hold(0.5, 0.0, True) is True
+    assert outdoor_heat_lock_should_hold(1.0, 0.0, True) is True
+    assert outdoor_heat_lock_should_hold(1.1, 0.0, True) is False
+
+
+def test_get_idle_heat_outdoor_lock_ac_only():
+    devices = [
+        {"entity_id": "climate.ac", "type": "ac", "idle_heat_outdoor_lock": True, "idle_heat_outdoor_below": -5},
+        {"entity_id": "climate.trv", "type": "trv", "idle_heat_outdoor_lock": True},
+    ]
+    enabled, sensor, below = get_idle_heat_outdoor_lock(devices, "climate.ac")
+    assert enabled is True
+    assert sensor == ""
+    assert below == -5.0
+    assert get_idle_heat_outdoor_lock(devices, "climate.trv") == (False, "", 0.0)

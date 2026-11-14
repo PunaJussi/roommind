@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import Context
 
 DOMAIN = "roommind"
-VERSION = "1.8.2.4"
+VERSION = "1.8.2.10"
 
 # Platforms
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BINARY_SENSOR, Platform.CLIMATE]
@@ -114,7 +114,7 @@ SETPOINT_RAMP_MODE_DEFAULT = SETPOINT_RAMP_MODE_FIXED
 SETPOINT_RAMP_DEADBAND_MIN = SETPOINT_RAMP_STEP_MIN
 SETPOINT_RAMP_DEADBAND_MAX = SETPOINT_RAMP_STEP_MAX
 SETPOINT_RAMP_DEADBAND_DEFAULT = SETPOINT_RAMP_STEP_DEFAULT
-SETPOINT_RAMP_OFFSET_MAX = 3.0  # °C the ramped setpoint may sit above/below the room target
+SETPOINT_RAMP_OFFSET_MAX = 5.0  # °C the ramped setpoint may sit above/below the room target (frost allowance)
 BOOST_CAP_FALLBACK_STEP = 0.5  # Distance kept below a device's max_temp for proportional heating setpoints when it reports no target_temp_step (#396)
 # Direct valve control (#413): TRVs whose valve opening RoomMind sets through number entities
 VALVE_DWELL_SECONDS = 600  # Minimum time a valve position stays before a small correction moves the motor again

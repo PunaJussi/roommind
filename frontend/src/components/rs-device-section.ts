@@ -2,9 +2,18 @@ import { LitElement, html, css, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { HomeAssistant, HassArea, DeviceConfig, DeviceType } from "../types";
 import { getEntitiesForArea } from "../utils/room-state";
-import { localize } from "../utils/localize";
+import { localize, type TranslationKey } from "../utils/localize";
 import { getSelectValue, openEntityInfo } from "../utils/events";
-import { tempUnit, toDisplayDelta, toCelsiusDelta, usesFahrenheit } from "../utils/temperature";
+import {
+  tempUnit,
+  toDisplay,
+  toDisplayDelta,
+  toCelsius,
+  toCelsiusDelta,
+  tempRange,
+  tempStep,
+  usesFahrenheit,
+} from "../utils/temperature";
 import { resolveHeatingSystemType } from "../utils/device-utils";
 import { masterDetailStyles } from "../styles/master-detail-styles";
 import { inputStyles } from "../styles/input-styles";
@@ -237,6 +246,44 @@ export class RsDeviceSection extends LitElement {
         line-height: 1.4;
         --mdc-icon-size: 18px;
       }
+      .fan-level-group {
+        margin: 12px 0 4px;
+        padding-top: 8px;
+        border-top: 1px solid var(--divider-color, #eee);
+      }
+
+      .fan-entity-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin: 4px 0 8px;
+      }
+
+      .fan-entity-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+      }
+
+      .fan-entity-name {
+        flex: 1;
+        min-width: 0;
+        font-size: 13px;
+        color: var(--primary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .field-hint {
+        display: block;
+        font-size: 12px;
+        color: var(--secondary-text-color);
+        line-height: 1.4;
+        margin: 0 0 8px;
+      }
+
       .boost-hint ha-icon {
         color: var(--primary-color);
         flex-shrink: 0;
@@ -425,7 +472,8 @@ export class RsDeviceSection extends LitElement {
     const showIdleBadge =
       device?.idle_action === "fan_only" ||
       device?.idle_action === "setback" ||
-      device?.idle_action === "low";
+      device?.idle_action === "low" ||
+      device?.idle_action === "hold";
     const hasValve =
       device?.type === "trv" && !!device?.valve_opening_entity && !!device?.valve_closing_entity;
     const showDirectBadge =
@@ -447,7 +495,9 @@ export class RsDeviceSection extends LitElement {
                       }`
                     : device!.idle_action === "low"
                       ? localize("devices.idle_action_low", this.hass.language)
-                      : localize("devices.idle_action_setback", this.hass.language)
+                      : device!.idle_action === "hold"
+                        ? localize("devices.idle_action_hold", this.hass.language)
+                        : localize("devices.idle_action_setback", this.hass.language)
                 }
               </span>`
             : nothing
@@ -752,7 +802,7 @@ export class RsDeviceSection extends LitElement {
       ${
         isAc
           ? html`
-              <div class="detail-field">
+              <div class="detail-field${device.idle_action === "hold" ? " with-info" : ""}">
                 <ha-select
                   .label=${localize("devices.idle_action", lang)}
                   .value=${device.idle_action ?? "off"}
@@ -767,6 +817,7 @@ export class RsDeviceSection extends LitElement {
                         ]
                       : []),
                     { value: "setback", label: localize("devices.idle_action_setback", lang) },
+                    { value: "hold", label: localize("devices.idle_action_hold", lang) },
                   ]}
                   @selected=${(e: Event) => this._onIdleActionChange(entityId, getSelectValue(e)!)}
                   @closed=${(e: Event) => e.stopPropagation()}
@@ -785,40 +836,41 @@ export class RsDeviceSection extends LitElement {
                   <ha-list-item value="setback"
                     >${localize("devices.idle_action_setback", lang)}</ha-list-item
                   >
+                  <ha-list-item value="hold"
+                    >${localize("devices.idle_action_hold", lang)}</ha-list-item
+                  >
                 </ha-select>
+                ${
+                  device.idle_action === "hold"
+                    ? html`<rs-info-icon
+                        .text=${localize("devices.idle_action_hold_hint", lang)}
+                      ></rs-info-icon>`
+                    : nothing
+                }
               </div>
+              ${this._renderFanSpeedPolicy(entityId, device, entityState, lang)}
               ${
-                device.idle_action === "fan_only"
-                  ? html`<div class="detail-field">
-                      <ha-select
-                        .label=${localize("devices.idle_fan_mode", lang)}
-                        .value=${
-                          device.idle_fan_mode === "" ? "__keep__" : (device.idle_fan_mode ?? "low")
-                        }
-                        .options=${[
-                          {
-                            value: "__keep__",
-                            label: localize("devices.idle_fan_mode_keep", lang),
-                          },
-                          ...((entityState?.attributes?.fan_modes ?? []) as string[]).map((fm) => ({
-                            value: fm,
-                            label: fm,
-                          })),
-                        ]}
-                        @selected=${(e: Event) => {
-                          const v = getSelectValue(e);
-                          this._onIdleFanModeChange(entityId, v === "__keep__" ? "" : v);
-                        }}
-                        @closed=${(e: Event) => e.stopPropagation()}
-                        fixedMenuPosition
-                      >
-                        <ha-list-item value="__keep__"
-                          >${localize("devices.idle_fan_mode_keep", lang)}</ha-list-item
-                        >
-                        ${((entityState?.attributes?.fan_modes ?? []) as string[]).map(
-                          (fm) => html`<ha-list-item value="${fm}">${fm}</ha-list-item>`,
+                device.idle_action === "setback"
+                  ? html`<div class="detail-field with-info">
+                      <ha-textfield
+                        .label=${localize("devices.setback_offset", lang)}
+                        .suffix=${tempUnit(this.hass)}
+                        .value=${String(
+                          Math.round(toDisplayDelta(device.setback_offset ?? 2, this.hass) * 10) /
+                            10,
                         )}
-                      </ha-select>
+                        type="number"
+                        .step=${usesFahrenheit(this.hass) ? "1" : "0.5"}
+                        .min=${String(toDisplayDelta(0.5, this.hass))}
+                        .max=${String(toDisplayDelta(5, this.hass))}
+                        @change=${(e: Event) => {
+                          const v = parseFloat((e.target as HTMLInputElement).value);
+                          if (!isNaN(v)) this._onSetbackOffsetChange(entityId, v);
+                        }}
+                      ></ha-textfield>
+                      <rs-info-icon
+                        .text=${localize("devices.setback_offset_hint", lang)}
+                      ></rs-info-icon>
                     </div>`
                   : nothing
               }
@@ -833,6 +885,53 @@ export class RsDeviceSection extends LitElement {
                           this._onSetbackAutoOffChange(entityId, e.detail)}
                       ></rs-toggle-row>
                     </div>`
+                  : nothing
+              }
+
+              <div class="detail-field">
+                <rs-toggle-row
+                  .label=${localize("devices.idle_heat_outdoor_lock", lang)}
+                  .hint=${localize("devices.idle_heat_outdoor_lock_hint", lang)}
+                  .checked=${device.idle_heat_outdoor_lock ?? false}
+                  @toggle-changed=${(e: CustomEvent<boolean>) =>
+                    this._onOutdoorLockChange(entityId, e.detail)}
+                ></rs-toggle-row>
+              </div>
+              ${
+                device.idle_heat_outdoor_lock
+                  ? html`
+                      <div class="detail-field with-info">
+                        <ha-entity-picker
+                          .hass=${this.hass}
+                          .includeDomains=${["sensor"]}
+                          .value=${device.idle_heat_outdoor_sensor ?? ""}
+                          .label=${localize("devices.idle_heat_outdoor_sensor", lang)}
+                          @value-changed=${(e: CustomEvent) =>
+                            this._onOutdoorLockSensorChange(
+                              entityId,
+                              (e.detail.value as string) || "",
+                            )}
+                        ></ha-entity-picker>
+                        <rs-info-icon
+                          .text=${localize("devices.idle_heat_outdoor_sensor_hint", lang)}
+                        ></rs-info-icon>
+                      </div>
+                      <div class="detail-field">
+                        <ha-textfield
+                          .label=${localize("devices.idle_heat_outdoor_below", lang)}
+                          .suffix=${tempUnit(this.hass)}
+                          .value=${String(toDisplay(device.idle_heat_outdoor_below ?? 0, this.hass))}
+                          type="number"
+                          step=${tempStep(this.hass)}
+                          min=${tempRange(-30, 20, this.hass).min}
+                          max=${tempRange(-30, 20, this.hass).max}
+                          @change=${(e: Event) => {
+                            const v = parseFloat((e.target as HTMLInputElement).value);
+                            if (!isNaN(v)) this._onOutdoorLockBelowChange(entityId, v);
+                          }}
+                        ></ha-textfield>
+                      </div>
+                    `
                   : nothing
               }
 
@@ -1366,6 +1465,20 @@ export class RsDeviceSection extends LitElement {
       if (deviceType === "ac" && updated.idle_action === "low") {
         updated.idle_action = "off";
       }
+      if (deviceType === "trv" && updated.idle_action === "hold") {
+        updated.idle_action = "off";
+      }
+      if (deviceType === "trv") {
+        delete updated.idle_heat_outdoor_lock;
+        delete updated.idle_heat_outdoor_sensor;
+        delete updated.idle_heat_outdoor_below;
+        delete updated.occupied_fan_enabled;
+        delete updated.occupied_fan_entities;
+        delete updated.occupied_fan_mode;
+        delete updated.override_fan_enabled;
+        delete updated.override_fan_entities;
+        delete updated.override_fan_mode;
+      }
       // coil_dry="on" is AC-only (no evaporator coil on a TRV); the backend
       // schema rejects it. Reset when switching to TRV so the next save does not fail.
       if (deviceType === "trv" && updated.coil_dry === "on") {
@@ -1395,13 +1508,59 @@ export class RsDeviceSection extends LitElement {
   private _onIdleActionChange(entityId: string, idleAction: string): void {
     const newDevices = this.devices.map((d) => {
       if (d.entity_id !== entityId) return d;
-      const updated = { ...d, idle_action: idleAction as "off" | "fan_only" | "setback" | "low" };
+      const updated = {
+        ...d,
+        idle_action: idleAction as "off" | "fan_only" | "setback" | "low" | "hold",
+      };
       if (idleAction === "fan_only" && !d.idle_fan_mode) {
         updated.idle_fan_mode = "low";
       }
       return updated;
     });
     this._fireDeviceChanged(newDevices);
+  }
+
+  private _onSetbackOffsetChange(entityId: string, displayValue: number): void {
+    const celsius = Math.max(
+      0.5,
+      Math.min(5, Math.round(toCelsiusDelta(displayValue, this.hass) * 10) / 10),
+    );
+    this._fireDeviceChanged(
+      this.devices.map((d) => (d.entity_id === entityId ? { ...d, setback_offset: celsius } : d)),
+    );
+  }
+
+  private _onOutdoorLockChange(entityId: string, enabled: boolean): void {
+    this._fireDeviceChanged(
+      this.devices.map((d) => {
+        if (d.entity_id !== entityId) return d;
+        const updated = { ...d, idle_heat_outdoor_lock: enabled };
+        if (!enabled) {
+          delete updated.idle_heat_outdoor_sensor;
+        }
+        return updated;
+      }),
+    );
+  }
+
+  private _onOutdoorLockSensorChange(entityId: string, sensor: string): void {
+    this._fireDeviceChanged(
+      this.devices.map((d) =>
+        d.entity_id === entityId ? { ...d, idle_heat_outdoor_sensor: sensor } : d,
+      ),
+    );
+  }
+
+  private _onOutdoorLockBelowChange(entityId: string, displayValue: number): void {
+    const celsius = Math.max(
+      -30,
+      Math.min(20, Math.round(toCelsius(displayValue, this.hass) * 10) / 10),
+    );
+    this._fireDeviceChanged(
+      this.devices.map((d) =>
+        d.entity_id === entityId ? { ...d, idle_heat_outdoor_below: celsius } : d,
+      ),
+    );
   }
 
   private _onSetbackAutoOffChange(entityId: string, enabled: boolean): void {
@@ -1420,6 +1579,234 @@ export class RsDeviceSection extends LitElement {
       d.entity_id === entityId ? { ...d, idle_fan_mode: fanMode } : d,
     );
     this._fireDeviceChanged(newDevices);
+  }
+
+  private _patchDevice(entityId: string, patch: Partial<DeviceConfig>): void {
+    this._fireDeviceChanged(
+      this.devices.map((d) => (d.entity_id === entityId ? { ...d, ...patch } : d)),
+    );
+  }
+
+  private _onOccupiedFanEnabledChange(entityId: string, enabled: boolean): void {
+    this._patchDevice(entityId, { occupied_fan_enabled: enabled });
+  }
+
+  private _onOverrideFanEnabledChange(entityId: string, enabled: boolean): void {
+    this._patchDevice(entityId, { override_fan_enabled: enabled });
+  }
+
+  private _onOccupiedFanModeChange(entityId: string, fanMode: string): void {
+    this._patchDevice(entityId, { occupied_fan_mode: fanMode });
+  }
+
+  private _onOverrideFanModeChange(entityId: string, fanMode: string): void {
+    this._patchDevice(entityId, { override_fan_mode: fanMode });
+  }
+
+  private _onFanEntityAdd(
+    entityId: string,
+    field: "occupied_fan_entities" | "override_fan_entities",
+    eid: string,
+  ): void {
+    if (!eid) return;
+    this._fireDeviceChanged(
+      this.devices.map((d) => {
+        if (d.entity_id !== entityId) return d;
+        const current = d[field] ?? [];
+        if (current.includes(eid)) return d;
+        return { ...d, [field]: [...current, eid] };
+      }),
+    );
+  }
+
+  private _onFanEntityRemove(
+    entityId: string,
+    field: "occupied_fan_entities" | "override_fan_entities",
+    eid: string,
+  ): void {
+    this._fireDeviceChanged(
+      this.devices.map((d) => {
+        if (d.entity_id !== entityId) return d;
+        return { ...d, [field]: (d[field] ?? []).filter((x) => x !== eid) };
+      }),
+    );
+  }
+
+  private _fanModeSelect(
+    label: string,
+    keepLabel: string,
+    value: string | undefined,
+    fanModes: string[],
+    onChange: (mode: string) => void,
+  ) {
+    const current = value === "" ? "__keep__" : (value ?? "low");
+    return html`
+      <div class="detail-field">
+        <ha-select
+          .label=${label}
+          .value=${current}
+          .options=${[
+            { value: "__keep__", label: keepLabel },
+            ...fanModes.map((fm) => ({ value: fm, label: fm })),
+          ]}
+          @selected=${(e: Event) => {
+            const v = getSelectValue(e);
+            onChange(v === "__keep__" ? "" : (v ?? ""));
+          }}
+          @closed=${(e: Event) => e.stopPropagation()}
+          fixedMenuPosition
+        >
+          <ha-list-item value="__keep__">${keepLabel}</ha-list-item>
+          ${fanModes.map((fm) => html`<ha-list-item value="${fm}">${fm}</ha-list-item>`)}
+        </ha-select>
+      </div>
+    `;
+  }
+
+  private _fanTriggerEntityFilter(selected: string[]) {
+    return (entity: { entity_id: string }) => !selected.includes(entity.entity_id);
+  }
+
+  private _renderFanEntityGroup(
+    entityId: string,
+    field: "occupied_fan_entities" | "override_fan_entities",
+    entities: string[],
+    hintKey: TranslationKey,
+    addKey: TranslationKey,
+    lang: string,
+  ) {
+    return html`
+      <span class="field-hint">${localize(hintKey, lang)}</span>
+      ${
+        entities.length > 0
+          ? html`
+              <div class="fan-entity-list">
+                ${entities.map((eid) => {
+                  const name =
+                    this.hass.states[eid]?.attributes?.friendly_name ??
+                    eid.split(".").slice(1).join(".");
+                  return html`
+                    <div class="fan-entity-row">
+                      <span class="fan-entity-name">${name}</span>
+                      <ha-icon-button
+                        .path=${"M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z"}
+                        @click=${() => this._onFanEntityRemove(entityId, field, eid)}
+                      ></ha-icon-button>
+                    </div>
+                  `;
+                })}
+              </div>
+            `
+          : nothing
+      }
+      <div class="detail-field">
+        <ha-entity-picker
+          .hass=${this.hass}
+          .includeDomains=${["binary_sensor", "input_boolean", "switch", "schedule", "calendar"]}
+          .entityFilter=${this._fanTriggerEntityFilter(entities)}
+          .label=${localize(addKey, lang)}
+          @value-changed=${(e: CustomEvent) => {
+            const val = e.detail?.value as string | undefined;
+            if (val) this._onFanEntityAdd(entityId, field, val);
+            const picker = e.target as HTMLElement & { value: string };
+            picker.value = "";
+          }}
+        ></ha-entity-picker>
+      </div>
+    `;
+  }
+
+  private _renderFanSpeedPolicy(
+    entityId: string,
+    device: DeviceConfig,
+    entityState: HomeAssistant["states"][string] | undefined,
+    lang: string,
+  ) {
+    const fanModes = (entityState?.attributes?.fan_modes ?? []) as string[];
+    if (fanModes.length === 0) return nothing;
+
+    const occupiedEntities = device.occupied_fan_entities ?? [];
+    const overrideEntities = device.override_fan_entities ?? [];
+    const occupiedOn = device.occupied_fan_enabled ?? false;
+    const overrideOn = device.override_fan_enabled ?? false;
+    const defaultValue =
+      device.idle_action === "fan_only" && !device.idle_fan_mode
+        ? "low"
+        : device.idle_fan_mode;
+
+    return html`
+      ${this._fanModeSelect(
+        localize("devices.idle_fan_mode", lang),
+        localize("devices.idle_fan_mode_keep", lang),
+        defaultValue,
+        fanModes,
+        (mode) => this._onIdleFanModeChange(entityId, mode),
+      )}
+      <div class="fan-level-group">
+        <div class="detail-field">
+          <rs-toggle-row
+            .label=${localize("devices.occupied_fan_enabled", lang)}
+            .hint=${localize("devices.occupied_fan_enabled_hint", lang)}
+            .checked=${occupiedOn}
+            @toggle-changed=${(e: CustomEvent<boolean>) =>
+              this._onOccupiedFanEnabledChange(entityId, e.detail)}
+          ></rs-toggle-row>
+        </div>
+        ${
+          occupiedOn
+            ? html`
+                ${this._renderFanEntityGroup(
+                  entityId,
+                  "occupied_fan_entities",
+                  occupiedEntities,
+                  "devices.occupied_fan_entities_hint",
+                  "devices.occupied_fan_add_entity",
+                  lang,
+                )}
+                ${this._fanModeSelect(
+                  localize("devices.occupied_fan_mode", lang),
+                  localize("devices.occupied_fan_mode_keep", lang),
+                  device.occupied_fan_mode ?? "",
+                  fanModes,
+                  (mode) => this._onOccupiedFanModeChange(entityId, mode),
+                )}
+              `
+            : nothing
+        }
+      </div>
+      <div class="fan-level-group">
+        <div class="detail-field">
+          <rs-toggle-row
+            .label=${localize("devices.override_fan_enabled", lang)}
+            .hint=${localize("devices.override_fan_enabled_hint", lang)}
+            .checked=${overrideOn}
+            @toggle-changed=${(e: CustomEvent<boolean>) =>
+              this._onOverrideFanEnabledChange(entityId, e.detail)}
+          ></rs-toggle-row>
+        </div>
+        ${
+          overrideOn
+            ? html`
+                ${this._renderFanEntityGroup(
+                  entityId,
+                  "override_fan_entities",
+                  overrideEntities,
+                  "devices.override_fan_entities_hint",
+                  "devices.override_fan_add_entity",
+                  lang,
+                )}
+                ${this._fanModeSelect(
+                  localize("devices.override_fan_mode", lang),
+                  localize("devices.override_fan_mode_keep", lang),
+                  device.override_fan_mode ?? "",
+                  fanModes,
+                  (mode) => this._onOverrideFanModeChange(entityId, mode),
+                )}
+              `
+            : nothing
+        }
+      </div>
+    `;
   }
 
   private _onSetpointModeChange(entityId: string, mode: string): void {

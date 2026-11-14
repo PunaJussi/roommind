@@ -83,15 +83,25 @@ export interface DeviceConfig {
   type: DeviceType;
   role: DeviceRole;
   heating_system_type?: string;
-  idle_action?: "off" | "fan_only" | "setback" | "low"; // default "off"
-  idle_fan_mode?: string; // default "low"
+  idle_action?: "off" | "fan_only" | "setback" | "low" | "hold"; // default "off"
+  idle_fan_mode?: string; // Default Fan speed; default "low"; "" = don't change
+  occupied_fan_enabled?: boolean; // default false
+  occupied_fan_entities?: string[]; // OR: any on → occupied_fan_mode
+  occupied_fan_mode?: string; // "" = level disabled
+  override_fan_enabled?: boolean; // default false
+  override_fan_entities?: string[]; // OR: any on → override_fan_mode
+  override_fan_mode?: string; // "" = level disabled
   setback_auto_off?: boolean; // setback ends in off after an hour without demand, default off (#255)
+  setback_offset?: number; // °C setback shift, default 2
+  idle_heat_outdoor_lock?: boolean; // keep heat while outdoor is below the threshold
+  idle_heat_outdoor_sensor?: string; // optional sensor; empty = global outdoor_temp_sensor
+  idle_heat_outdoor_below?: number; // °C, default 0
   setpoint_mode?: "proportional" | "direct"; // default "proportional"
   setpoint_offset?: number; // °C added to the room target in direct mode, default 0
   setpoint_ramp_minutes?: number; // 0 = off, otherwise minutes between AC setpoint steps
   setpoint_ramp_step?: number; // max °C moved toward the proportional setpoint per step
   setpoint_ramp_mode?: "fixed" | "delta"; // default "fixed"
-  setpoint_ramp_deadband?: number; // °C; delta mode: no change while |error| is within this
+  setpoint_ramp_deadband?: number; // °C; delta mode: ease toward the room target while |error| is within this
   compressor_run_sensor?: string; // ENERGY Period (or similar): below 1 = compressor off
   coil_dry?: "inherit" | "on" | "off"; // default "inherit"
   coil_dry_minutes?: number; // 0 = inherit global

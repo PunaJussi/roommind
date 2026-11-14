@@ -86,7 +86,7 @@ Coverage must stay ≥ 95% (enforced in CI). Check locally:
 
 ### i18n
 
-All user-facing strings go through `localize()`. Add new keys to `frontend/src/locales/en.json`, `de.json` and `fr.json`.
+All user-facing strings go through `localize()`. This fork ships English only — add new keys to `frontend/src/locales/en.json`.
 
 ## Commit Messages
 

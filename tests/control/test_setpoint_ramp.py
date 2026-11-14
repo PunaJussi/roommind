@@ -48,6 +48,12 @@ def test_cooling_steps_down():
     assert sent == 24.5
 
 
+def test_advance_moves_toward_desired_without_overshoot():
+    ramp = SetpointRamp()
+    sent = ramp.advance("climate.ac", MODE_HEATING, 1_000, minutes=60, step=0.5, direction=-1, seed=22.3, desired=22.0)
+    assert sent == 22.0
+
+
 def test_mode_change_keeps_the_last_value():
     ramp = SetpointRamp()
     ramp.advance("climate.ac", MODE_HEATING, 1_000, minutes=60, step=0.5, direction=1, seed=22.0)
@@ -189,8 +195,8 @@ async def test_apply_steps_up_from_the_thermostat_when_the_room_is_cold():
 
 
 @pytest.mark.asyncio
-async def test_idle_applies_idle_action_and_does_not_trim():
-    """At the target Gradual does not keep heat on; the idle action runs instead."""
+async def test_idle_applies_idle_action_and_eases_the_setpoint():
+    """At the target Gradual does not keep heat on; the idle action runs and the setpoint eases down."""
     hass = build_hass()
     hass.states.get = MagicMock(return_value=_ac_state(temperature=25.0))
     room = _ramped_room()
@@ -204,13 +210,14 @@ async def test_idle_applies_idle_action_and_does_not_trim():
         has_external_sensor=True,
     )
     await ctrl.async_apply("idle", 22.0, current_temp=23.0)
-    assert _temps(hass) == []
+    assert _temps(hass) == [24.5]
     mode_calls = [c for c in hass.services.async_call.call_args_list if c[0][1] == "set_hvac_mode"]
     assert mode_calls and mode_calls[0][0][2]["hvac_mode"] == "fan_only"
+    assert "heat" not in [c[0][2].get("hvac_mode") for c in mode_calls]
 
 
 @pytest.mark.asyncio
-async def test_room_inside_the_step_holds_the_setpoint():
+async def test_room_inside_the_step_eases_toward_the_target():
     hass = build_hass()
     hass.states.get = MagicMock(return_value=_ac_state(temperature=23.0))
     ctrl = MPCController(
@@ -222,7 +229,7 @@ async def test_room_inside_the_step_holds_the_setpoint():
         has_external_sensor=True,
     )
     await ctrl.async_apply("heating", 22.0, power_fraction=0.0, current_temp=22.2)
-    assert all(t == 23.0 for t in _temps(hass))
+    assert _temps(hass) == [22.5]
     assert "set_hvac_mode" not in _modes(hass)
 
 
@@ -298,7 +305,7 @@ async def test_delta_step_moves_by_the_room_error():
 
 
 @pytest.mark.asyncio
-async def test_delta_deadband_holds_the_setpoint():
+async def test_delta_deadband_eases_toward_the_target():
     hass = build_hass()
     hass.states.get = MagicMock(return_value=_ac_state(temperature=23.0))
     ctrl = MPCController(
@@ -310,7 +317,39 @@ async def test_delta_deadband_holds_the_setpoint():
         has_external_sensor=True,
     )
     await ctrl.async_apply("heating", 22.0, power_fraction=0.0, current_temp=22.2)
-    assert all(t == 23.0 for t in _temps(hass))
+    assert _temps(hass) == [22.5]
+
+
+@pytest.mark.asyncio
+async def test_heating_overshoot_lowers_the_setpoint():
+    hass = build_hass()
+    hass.states.get = MagicMock(return_value=_ac_state(temperature=23.0))
+    ctrl = MPCController(
+        hass,
+        _ramped_room(),
+        model_manager=RoomModelManager(),
+        outdoor_temp=5.0,
+        settings={},
+        has_external_sensor=True,
+    )
+    await ctrl.async_apply("heating", 22.0, power_fraction=1.0, current_temp=24.0)
+    assert _temps(hass) == [22.5]
+
+
+@pytest.mark.asyncio
+async def test_ramp_clamps_to_offset_max():
+    hass = build_hass()
+    hass.states.get = MagicMock(return_value=_ac_state(temperature=28.5))
+    ctrl = MPCController(
+        hass,
+        _ramped_room(),
+        model_manager=RoomModelManager(),
+        outdoor_temp=5.0,
+        settings={},
+        has_external_sensor=True,
+    )
+    await ctrl.async_apply("heating", 21.0, power_fraction=1.0, current_temp=20.0)
+    assert _temps(hass) == [26.0]
 
 
 @pytest.mark.asyncio

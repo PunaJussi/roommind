@@ -2498,6 +2498,12 @@ async def test_validate_device_idle_action_unit():
     # AC + low is rejected
     with pytest.raises(vol.Invalid):
         _validate_device_idle_action({"type": "ac", "idle_action": "low"})
+    assert _validate_device_idle_action({"type": "ac", "idle_action": "hold"}) == {
+        "type": "ac",
+        "idle_action": "hold",
+    }
+    with pytest.raises(vol.Invalid):
+        _validate_device_idle_action({"type": "trv", "idle_action": "hold"})
 
 
 @pytest.mark.asyncio
@@ -3138,6 +3144,66 @@ async def test_validate_device_coil_dry_unit():
         _validate_device_coil_dry({"type": "trv", "coil_dry": "on"})
 
 
+def test_validate_device_fan_speed_policy_unit():
+    """Occupied/override fan fields are AC-only; entity domains are restricted."""
+    import voluptuous as vol
+
+    from custom_components.roommind.websocket_api import _validate_device_fan_speed_policy
+
+    cleared = _validate_device_fan_speed_policy(
+        {
+            "type": "trv",
+            "occupied_fan_enabled": True,
+            "occupied_fan_entities": ["binary_sensor.x"],
+            "occupied_fan_mode": "3",
+            "override_fan_enabled": True,
+            "override_fan_entities": ["input_boolean.ov"],
+            "override_fan_mode": "5",
+        }
+    )
+    assert cleared["occupied_fan_enabled"] is False
+    assert cleared["occupied_fan_entities"] == []
+    assert cleared["occupied_fan_mode"] == ""
+    assert cleared["override_fan_enabled"] is False
+    assert cleared["override_fan_entities"] == []
+    assert cleared["override_fan_mode"] == ""
+
+    ok = _validate_device_fan_speed_policy(
+        {
+            "type": "ac",
+            "occupied_fan_enabled": True,
+            "occupied_fan_entities": ["binary_sensor.occ", "input_boolean.flag"],
+            "occupied_fan_mode": "3",
+            "override_fan_enabled": True,
+            "override_fan_entities": ["input_boolean.ov"],
+            "override_fan_mode": "5",
+        }
+    )
+    assert ok["occupied_fan_entities"] == ["binary_sensor.occ", "input_boolean.flag"]
+    assert ok["override_fan_entities"] == ["input_boolean.ov"]
+
+    schedule_ok = _validate_device_fan_speed_policy(
+        {
+            "type": "ac",
+            "override_fan_entities": ["schedule.evening", "switch.scheduler_boost", "calendar.work"],
+        }
+    )
+    assert schedule_ok["override_fan_entities"] == [
+        "schedule.evening",
+        "switch.scheduler_boost",
+        "calendar.work",
+    ]
+
+    with pytest.raises(vol.Invalid):
+        _validate_device_fan_speed_policy(
+            {"type": "ac", "occupied_fan_entities": ["person.alice"]}
+        )
+    with pytest.raises(vol.Invalid):
+        _validate_device_fan_speed_policy(
+            {"type": "ac", "override_fan_entities": ["person.alice"]}
+        )
+
+
 @pytest.mark.asyncio
 async def test_coil_dry_settings_schema_ranges():
     """Out-of-range values are rejected."""
@@ -3397,3 +3463,54 @@ def test_setback_auto_off_schema_has_no_default():
     assert on["setback_auto_off"] is True
     with pytest.raises(vol.Invalid):
         _validate({"entity_id": "climate.ac", "type": "ac", "setback_auto_off": "yes"})
+
+
+def test_hold_and_setback_offset_and_outdoor_lock_schema():
+    """Never idle, setback offset, and outdoor heat lock are validated on AC devices."""
+    import voluptuous as vol
+
+    schema = websocket_save_room._ws_schema
+
+    def _validate(device):
+        return schema({"type": "roommind/rooms/save", "id": 1, "area_id": "lr", "devices": [device]})["devices"][0]
+
+    hold = _validate({"entity_id": "climate.ac", "type": "ac", "idle_action": "hold"})
+    assert hold["idle_action"] == "hold"
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.trv", "type": "trv", "idle_action": "hold"})
+
+    bare = _validate({"entity_id": "climate.ac", "type": "ac"})
+    assert bare["setback_offset"] == 2.0
+    assert bare["idle_heat_outdoor_lock"] is False
+    assert bare["idle_heat_outdoor_sensor"] == ""
+    assert bare["idle_heat_outdoor_below"] == 0.0
+    assert _validate({"entity_id": "climate.ac", "type": "ac", "setback_offset": 1})["setback_offset"] == 1.0
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "setback_offset": 0.2})
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "setback_offset": 6})
+
+    locked = _validate(
+        {
+            "entity_id": "climate.ac",
+            "type": "ac",
+            "idle_heat_outdoor_lock": True,
+            "idle_heat_outdoor_sensor": "sensor.yard",
+            "idle_heat_outdoor_below": -5,
+        }
+    )
+    assert locked["idle_heat_outdoor_lock"] is True
+    assert locked["idle_heat_outdoor_sensor"] == "sensor.yard"
+    assert locked["idle_heat_outdoor_below"] == -5.0
+    with pytest.raises(vol.Invalid):
+        _validate({"entity_id": "climate.ac", "type": "ac", "idle_heat_outdoor_sensor": "climate.out"})
+    trv = _validate(
+        {
+            "entity_id": "climate.trv",
+            "type": "trv",
+            "idle_heat_outdoor_lock": True,
+            "idle_heat_outdoor_sensor": "sensor.out",
+        }
+    )
+    assert trv["idle_heat_outdoor_lock"] is False
+    assert trv["idle_heat_outdoor_sensor"] == ""

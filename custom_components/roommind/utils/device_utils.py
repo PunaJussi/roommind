@@ -26,7 +26,19 @@ IDLE_ACTION_FAN_ONLY = "fan_only"
 DEFAULT_IDLE_FAN_MODE = "low"
 IDLE_ACTION_SETBACK = "setback"
 IDLE_ACTION_LOW = "low"
+IDLE_ACTION_HOLD = "hold"
 DEFAULT_IDLE_SETBACK_OFFSET = 2.0
+SETBACK_OFFSET_MIN = 0.5
+SETBACK_OFFSET_MAX = 5.0
+SETBACK_OFFSET_STEP = 0.5
+
+# Outdoor heat lock: keep heat while outdoor is below the threshold (or the
+# sensor is unavailable). Releases only once outdoor is readable and above
+# threshold + hysteresis.
+IDLE_HEAT_OUTDOOR_HYSTERESIS = 1.0
+DEFAULT_IDLE_HEAT_OUTDOOR_BELOW = 0.0
+IDLE_HEAT_OUTDOOR_BELOW_MIN = -30.0
+IDLE_HEAT_OUTDOOR_BELOW_MAX = 20.0
 
 # What the second valve entity of a TRV with direct valve control means (#482): a closing
 # degree (SONOFF TRVZB, closed position = 100 - value) or the opening while the TRV does
@@ -82,6 +94,18 @@ class CoilDryConfig(NamedTuple):
     drain_minutes: int
 
 
+class FanSpeedPolicy(NamedTuple):
+    """Per-AC Default / Occupied / Override fan speeds."""
+
+    default_mode: str  # idle_fan_mode; "" = do not send set_fan_mode
+    occupied_enabled: bool
+    occupied_mode: str  # "" = level disabled
+    occupied_entities: tuple[str, ...]
+    override_enabled: bool
+    override_mode: str  # "" = level disabled
+    override_entities: tuple[str, ...]
+
+
 # Active HVAC modes that indicate real device capabilities.
 _ACTIVE_HVAC_MODES = {"heat", "cool", "heat_cool", "auto"}
 
@@ -119,6 +143,12 @@ def legacy_to_devices(
                 "heating_system_type": heating_system_type,
                 "idle_action": IDLE_ACTION_OFF,
                 "idle_fan_mode": DEFAULT_IDLE_FAN_MODE,
+                "occupied_fan_enabled": False,
+                "occupied_fan_entities": [],
+                "occupied_fan_mode": "",
+                "override_fan_enabled": False,
+                "override_fan_entities": [],
+                "override_fan_mode": "",
                 "setpoint_mode": SETPOINT_MODE_PROPORTIONAL,
                 "coil_dry": COIL_DRY_INHERIT,
                 "coil_dry_minutes": 0,
@@ -135,6 +165,12 @@ def legacy_to_devices(
                 "heating_system_type": "",
                 "idle_action": IDLE_ACTION_OFF,
                 "idle_fan_mode": DEFAULT_IDLE_FAN_MODE,
+                "occupied_fan_enabled": False,
+                "occupied_fan_entities": [],
+                "occupied_fan_mode": "",
+                "override_fan_enabled": False,
+                "override_fan_entities": [],
+                "override_fan_mode": "",
                 "setpoint_mode": SETPOINT_MODE_PROPORTIONAL,
                 "setpoint_ramp_minutes": 0,
                 "setpoint_ramp_step": 0.5,
@@ -287,10 +323,113 @@ def get_idle_action(devices: list[dict], entity_id: str) -> tuple[str, str]:
     )
 
 
+def _entity_id_tuple(raw: Any) -> tuple[str, ...]:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(str(e) for e in raw if e)
+
+
+def get_fan_speed_policy(devices: list[dict], entity_id: str) -> FanSpeedPolicy:
+    """Return Default / Occupied / Override fan policy for an AC (empty for others)."""
+    empty = FanSpeedPolicy(
+        default_mode="",
+        occupied_enabled=False,
+        occupied_mode="",
+        occupied_entities=(),
+        override_enabled=False,
+        override_mode="",
+        override_entities=(),
+    )
+    dev = get_device_by_eid(devices, entity_id)
+    if not dev or not is_ac_type(dev):
+        return empty
+    default = dev.get("idle_fan_mode")
+    if default is None:
+        default = DEFAULT_IDLE_FAN_MODE
+    return FanSpeedPolicy(
+        default_mode=str(default),
+        occupied_enabled=bool(dev.get("occupied_fan_enabled", False)),
+        occupied_mode=str(dev.get("occupied_fan_mode") or ""),
+        occupied_entities=_entity_id_tuple(dev.get("occupied_fan_entities")),
+        override_enabled=bool(dev.get("override_fan_enabled", False)),
+        override_mode=str(dev.get("override_fan_mode") or ""),
+        override_entities=_entity_id_tuple(dev.get("override_fan_entities")),
+    )
+
+
+def resolve_fan_mode(
+    policy: FanSpeedPolicy,
+    *,
+    override_active: bool,
+    occupied: bool,
+) -> str:
+    """Pick the fan mode to send; empty means do not call set_fan_mode.
+
+    Priority: override (enabled + any entity on) > occupied (enabled + any on) > default.
+    An empty mode at a level disables that level.
+    """
+    if policy.override_enabled and override_active and policy.override_mode:
+        return policy.override_mode
+    if policy.occupied_enabled and occupied and policy.occupied_mode:
+        return policy.occupied_mode
+    return policy.default_mode or ""
+
+
 def get_setback_auto_off(devices: list[dict], entity_id: str) -> bool:
     """True if a setback device may be switched off after a long idle with no run ahead (#255)."""
     dev = get_device_by_eid(devices, entity_id)
     return bool(dev and dev.get("setback_auto_off", False))
+
+
+def get_setback_offset(devices: list[dict], entity_id: str) -> float:
+    """Return the setback offset (°C) of a device, default 2.0 if unset or invalid."""
+    dev = get_device_by_eid(devices, entity_id)
+    if dev is None:
+        return DEFAULT_IDLE_SETBACK_OFFSET
+    try:
+        offset = float(dev.get("setback_offset", DEFAULT_IDLE_SETBACK_OFFSET))
+    except (TypeError, ValueError):
+        return DEFAULT_IDLE_SETBACK_OFFSET
+    if offset != offset:  # NaN
+        return DEFAULT_IDLE_SETBACK_OFFSET
+    return max(SETBACK_OFFSET_MIN, min(SETBACK_OFFSET_MAX, offset))
+
+
+def outdoor_heat_lock_should_hold(
+    outdoor_c: float | None,
+    below: float,
+    latched: bool,
+    hysteresis: float = IDLE_HEAT_OUTDOOR_HYSTERESIS,
+) -> bool:
+    """Whether outdoor heat lock should keep the unit in heat.
+
+    Unavailable/unknown outdoor (``None``) holds the lock. A latched lock
+    releases only once outdoor is readable and strictly above ``below + hysteresis``.
+    """
+    if outdoor_c is None:
+        return True
+    if outdoor_c < below:
+        return True
+    if latched and outdoor_c <= below + hysteresis:
+        return True
+    return False
+
+
+def get_idle_heat_outdoor_lock(devices: list[dict], entity_id: str) -> tuple[bool, str, float]:
+    """Return (enabled, sensor_entity_id, below_celsius) for an AC outdoor heat lock."""
+    dev = get_device_by_eid(devices, entity_id)
+    if not dev or dev.get("type") != DEVICE_TYPE_AC:
+        return (False, "", DEFAULT_IDLE_HEAT_OUTDOOR_BELOW)
+    enabled = bool(dev.get("idle_heat_outdoor_lock", False))
+    sensor = str(dev.get("idle_heat_outdoor_sensor") or "")
+    try:
+        below = float(dev.get("idle_heat_outdoor_below", DEFAULT_IDLE_HEAT_OUTDOOR_BELOW))
+    except (TypeError, ValueError):
+        below = DEFAULT_IDLE_HEAT_OUTDOOR_BELOW
+    if below != below:  # NaN
+        below = DEFAULT_IDLE_HEAT_OUTDOOR_BELOW
+    below = max(IDLE_HEAT_OUTDOOR_BELOW_MIN, min(IDLE_HEAT_OUTDOOR_BELOW_MAX, below))
+    return (enabled, sensor, below)
 
 
 def get_direct_setpoint_eids(devices: list[dict]) -> set[str]:

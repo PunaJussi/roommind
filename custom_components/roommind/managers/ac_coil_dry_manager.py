@@ -30,6 +30,7 @@ from ..utils.device_utils import (
     COIL_DRY_PHASE_DRAIN,
     COIL_DRY_STALE_SECONDS,
     IDLE_ACTION_FAN_ONLY,
+    IDLE_ACTION_HOLD,
     IDLE_ACTION_SETBACK,
     CoilDryConfig,
     get_ac_eids,
@@ -269,7 +270,9 @@ class AcCoilDryManager:
         # The drain phase only means anything if the device is really off during
         # it.  With idle_action="setback" (and no force_off) it stays in cool
         # mode, so skip straight to blowing.
-        drain_effective = cfg.drain_minutes > 0 and (force_off or idle_action != IDLE_ACTION_SETBACK)
+        drain_effective = cfg.drain_minutes > 0 and (
+            force_off or idle_action not in (IDLE_ACTION_SETBACK, IDLE_ACTION_HOLD)
+        )
 
         if drain_effective:
             st.phase = COIL_DRY_PHASE_DRAIN

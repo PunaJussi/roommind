@@ -118,11 +118,11 @@ The fields are on the device, in the room's device editor, for a climate device 
 - `Adjustment interval`: 5 to 360 minutes. 60 minutes is a calm start. 0 minutes, the default, leaves the original Proportional boost in place.
 - `Step mode`: `Fixed step` or `Delta step`. Fixed is the default.
 - `Maximum step` (Fixed step): 0.1 to 5 °C. 0.5 °C is a calm start. A device that only accepts whole degrees still moves by at least its own `target_temp_step`.
-- `Deadband` (Delta step): 0.1 to 5 °C. 0.5 °C is a calm start. No setpoint change while the room is this close to the target.
+- `Deadband` (Delta step): 0.1 to 5 °C. 0.5 °C is a calm start. Inside this band the setpoint steps back toward the room target.
 
-When the room is colder than the target, RoomMind puts the unit in `heat` and raises the setpoint already on the unit. Fixed step always moves one maximum step. Delta step moves by the room's distance from the target (capped at 5 °C), so a larger gap means a larger change. When the room is warmer, it lowers the setpoint. Cooling uses the cooling target the same way. Inside the deadband (Fixed: the same as the step; Delta: the Deadband field) the last value stays, so the unit's own sensor can sit several degrees away from the room. That settled value is what compensates for the outdoor-dependent sensor gap. There is no separate outdoor curve.
+When the room is colder than the target, RoomMind puts the unit in `heat` and raises the setpoint already on the unit. Fixed step always moves one maximum step. Delta step moves by the room's distance from the target (capped at 5 °C), so a larger gap means a larger change. When the room is warmer, it lowers the setpoint. Cooling uses the cooling target the same way. The setpoint may sit at most 5 °C above or below the room target (enough for a cold outdoor gap, not a run-away 28–30 °C). Inside the deadband (Fixed: the same as the step; Delta: the Deadband field) — and while idle — the setpoint steps back toward the room target, so a high trim does not stick. There is no separate outdoor curve.
 
-When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. Gradual does not keep `heat` on. A later heating run continues from the setpoint on the unit, not from the boosted max.
+When the room is at the target (inside the start band), the unit's idle action applies — fan-only if you chose that. `Never idle` and **Keep heat when outdoor is cold** leave the unit in `heat` (or `cool`) only — they do not rewrite the setpoint. Gradual eases the setpoint toward the room target on its interval. A later heating run continues from that eased value, not from the boosted max.
 
 `Compressor run sensor` (optional): a sensor such as ENERGY Period, used when the climate entity does not report `hvac_action`. A value below 1 means the compressor is off. RoomMind uses this to train Intelligent control. It does not keep heating on at the target.
 
@@ -157,7 +157,7 @@ How it behaves:
 
 A valve does not deliver heat in proportion to its opening: many radiators give most of their output at a small opening. RoomMind learns the room's response at the openings it actually uses.
 
-## Idle Behavior: Off, Fan Only, Setback
+## Idle Behavior: Off, Fan Only, Setback, Never idle
 
 `When idle` applies to `Climate Device` entries.
 
@@ -174,12 +174,25 @@ Useful when you want:
 - air circulation
 - less harsh on/off transitions
 
+### Fan speed: Default, Occupied, Override
+
+On a Climate Device that advertises `fan_modes`, RoomMind always sets fan speed while it is controlling the unit (heat, cool, fan only, Never idle) — not only during Fan only idle.
+
+Priority (highest first):
+
+1. **Evaporator drying** — while a coil-dry run owns the device, its drying fan speed wins. Occupied/Override do not interrupt drying.
+2. **Override Fan speed** — when the Override toggle is on and any of its entities is `on` (OR). `binary_sensor`, `input_boolean`, `switch`, `schedule` or `calendar`. Wins over Occupied and Default.
+3. **Room Occupied Fan speed** — when the Occupied toggle is on and any of its entities is `on` (OR). Same entity types as Override. Separate from the room’s occupancy-eco sensors.
+4. **Default Fan speed** — the previous Fan speed field (`idle_fan_mode`). Empty / Don’t change skips `set_fan_mode` at that level.
+
+Turning a level off keeps its entities and speed stored but unused. An empty list or empty speed also disables that level. Speeds the device does not report are skipped.
+
 ### Setback
 
-RoomMind keeps the current HVAC mode active, but moves the target away from the room target:
+RoomMind keeps the current HVAC mode active, but moves the target away from the room target. The offset is set per device (default 2 °C, 0.5–5 °C):
 
-- heating setback = `heat target - 2°C`
-- cooling setback = `cool target + 2°C`
+- heating setback = `heat target - offset`
+- cooling setback = `cool target + offset`
 
 A `Direct` device's own offset and, for ACs, the learned idle sensor offset (see [Learned sensor offset](#learned-sensor-offset-acs)) are added to it.
 
@@ -187,10 +200,19 @@ This lets the device back off instead of shutting off completely, so short pause
 
 By default the device stays on in setback however long the pause is. With **Turn off after an hour without demand** (below the idle setting) long pauses end in off: once the room has had no heating or cooling demand for an hour, and RoomMind's plan expects no run in the device's mode for the next hour, the device is turned off. When demand returns, RoomMind switches it back on as usual. This needs the predictive control (Full Control with an external sensor and a trained model). In Managed Mode, with `Simple` control, or while the model is still learning, the setback stays until the next run.
 
-Important:
+The setback offset and auto-off apply only while **When idle** is Setback. They have no effect on Turn off, Fan only, or Never idle.
 
-- the setback offset is currently fixed at `2°C`
-- it is **not configurable** in the current UI
+### Never idle
+
+RoomMind leaves the unit in `heat` or `cool`. It does not turn the device off, switch to fan-only, apply a setback, or change the setpoint. Gradual thermostat (when enabled) still eases the setpoint toward the room target; otherwise the last commanded setpoint stays. The heat pump's own thermostat starts and stops the compressor from that setpoint.
+
+A schedule or away action that turns the room off, an open window, and climate control switched off still stop the unit.
+
+### Keep heat when outdoor is cold
+
+On an AC, **Keep heat when outdoor is cold** overrides the idle action while outdoor temperature is below the threshold (default 0 °C). RoomMind then behaves like Never idle in `heat` (mode only, no setpoint rewrite), even if When idle is Fan only, Turn off, or Setback. The setting stays on if the outdoor sensor is unavailable or unknown. It releases only once outdoor is readable and more than 1 °C above the threshold.
+
+You can pick a dedicated outdoor sensor on the device; leave it empty to use the global outdoor temperature sensor from Settings. It does not apply during a cooling idle, and a schedule/window off still wins.
 
 ## Idle Behavior for Thermostats: Off, Low
 

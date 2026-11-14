@@ -136,23 +136,32 @@ class SetpointRamp:
         direction: int,
         seed: float | None,
         device_step: float | None = None,
+        desired: float | None = None,
     ) -> float | None:
         """Setpoint to send now, at most one stride from the last one.
 
         ``direction`` is +1 to raise the setpoint, -1 to lower it, and 0 to
-        keep it. A change between heating and cooling keeps the last value:
-        the user switched the unit, and the next step leaves from there.
-        With no history, ``seed`` (the unit's current thermostat reading) is
-        the start, and a non-zero direction takes the first step at once.
+        keep it. ``desired`` is the value to move toward; without it a step
+        is taken in ``direction``. A change between heating and cooling keeps
+        the last value: the user switched the unit, and the next step leaves
+        from there. With no history, ``seed`` (the unit's current thermostat
+        reading) is the start, and a non-zero direction takes the first step
+        at once.
         """
         stride = step
         if device_step is not None and device_step > stride:
             stride = device_step
+
+        def _goal(current: float) -> float:
+            if desired is not None:
+                return desired
+            return current + direction * (stride + 1.0)
+
         record = self._records.get(entity_id)
         if record is None:
             if seed is None:
                 return None
-            sent = seed if direction == 0 else _move_toward(seed, seed + direction * (stride + 1.0), stride)
+            sent = seed if direction == 0 else _move_toward(seed, _goal(seed), stride)
             self._store(entity_id, sent, now, mode)
             return sent
         if record[2] != mode:
@@ -160,7 +169,8 @@ class SetpointRamp:
             self.dirty = True
         if direction == 0 or now - float(record[1]) < minutes * 60:
             return float(record[0])
-        sent = _move_toward(float(record[0]), float(record[0]) + direction * (stride + 1.0), stride)
+        current = float(record[0])
+        sent = _move_toward(current, _goal(current), stride)
         self._store(entity_id, sent, now, mode)
         return sent
 
@@ -179,6 +189,11 @@ class SetpointRamp:
         """Last ramped setpoint in °C, or None when this device has no run in progress."""
         record = self._records.get(entity_id)
         return None if record is None else float(record[0])
+
+    def mode(self, entity_id: str) -> str | None:
+        """Last heating/cooling intent stored for this device, or None."""
+        record = self._records.get(entity_id)
+        return None if record is None else str(record[2])
 
     def prune(self, known_eids: set[str]) -> None:
         """Drop ramps of devices that are no longer configured anywhere."""
